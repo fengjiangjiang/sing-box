@@ -351,22 +351,9 @@ jobs:
         run: |-
           go run -v ./cmd/internal/update_android_version --ci --nightly
 
-      # - name: Build
-      #   run: |-
-      #     mkdir clients/android/app/libs
-      #     cp libbox.aar clients/android/app/libs
-      #     cd clients/android
-      #     ./gradlew :app:assemblePlayRelease :app:assembleOtherRelease --stacktrace --scan
-      #   env:
-      #     JAVA_HOME: /usr/lib/jvm/java-17-openjdk-amd64
-      #     ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
-      #     LOCAL_PROPERTIES: ${{ secrets.LOCAL_PROPERTIES }}
-
       - name: Prepare upload
         run: |-
           mkdir -p dist
-          # cp clients/android/app/build/outputs/apk/play/release/*.apk dist
-          # cp clients/android/app/build/outputs/apk/other/release/*-universal.apk dist
           cp libbox.aar dist/
 
       - name: Upload artifact
@@ -672,4 +659,3 @@ jobs:
           ghr --replace -p 5 "v${VERSION}" dist
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-Update build.yml · fengjiangjiang/sing-box@d409cd7
