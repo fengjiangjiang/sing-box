@@ -122,7 +122,7 @@ func buildAndroid() {
 	}
 
 	const name = "libbox.aar"
-	copyPath := filepath.Join("..","aar")
+	copyPath := filepath.Join("..")
 	if rw.IsDir(copyPath) {
 		copyPath, _ = filepath.Abs(copyPath)
 		err = rw.CopyFile(name, filepath.Join(copyPath, name))
