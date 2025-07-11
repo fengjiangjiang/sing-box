@@ -1,3 +1,22 @@
+Skip to content
+Navigation Menu
+fengjiangjiang
+sing-box
+
+Type / to search
+Code
+Pull requests
+Actions
+Projects
+Security
+Insights
+Settings
+Build
+Build #8
+Jobs
+Run details
+Workflow file for this run
+.github/workflows/build.yml at d409cd7
 name: Build
 
 on:
@@ -331,26 +350,31 @@ jobs:
         if: github.event_name != 'workflow_dispatch'
         run: |-
           go run -v ./cmd/internal/update_android_version --ci --nightly
-      - name: Build
-        run: |-
-          mkdir clients/android/app/libs
-          cp libbox.aar clients/android/app/libs
-          cd clients/android
-          ./gradlew :app:assemblePlayRelease :app:assembleOtherRelease --stacktrace --scan
-        env:
-          JAVA_HOME: /usr/lib/jvm/java-17-openjdk-amd64
-          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
-          LOCAL_PROPERTIES: ${{ secrets.LOCAL_PROPERTIES }}
+
+      # - name: Build
+      #   run: |-
+      #     mkdir clients/android/app/libs
+      #     cp libbox.aar clients/android/app/libs
+      #     cd clients/android
+      #     ./gradlew :app:assemblePlayRelease :app:assembleOtherRelease --stacktrace --scan
+      #   env:
+      #     JAVA_HOME: /usr/lib/jvm/java-17-openjdk-amd64
+      #     ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+      #     LOCAL_PROPERTIES: ${{ secrets.LOCAL_PROPERTIES }}
+
       - name: Prepare upload
         run: |-
           mkdir -p dist
-          cp clients/android/app/build/outputs/apk/play/release/*.apk dist
-          cp clients/android/app/build/outputs/apk/other/release/*-universal.apk dist
+          # cp clients/android/app/build/outputs/apk/play/release/*.apk dist
+          # cp clients/android/app/build/outputs/apk/other/release/*-universal.apk dist
+          cp libbox.aar dist/
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: binary-android-apks
-          path: 'dist'
+          name: file-aar
+          path: 'dist/libbox.aar'
+
   publish_android:
     name: Publish Android
     if: github.event_name == 'workflow_dispatch' && inputs.build == 'publish-android'
@@ -501,22 +525,17 @@ jobs:
           security import $CERTIFICATE_PATH -P "$P12_PASSWORD" -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
           security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
           security list-keychain -d user -s $KEYCHAIN_PATH
-
           PROFILES_ZIP_PATH=$RUNNER_TEMP/Profiles.zip
           echo -n "$PROVISIONING_PROFILES" | base64 --decode -o $PROFILES_ZIP_PATH
-
           PROFILES_PATH="$HOME/Library/MobileDevice/Provisioning Profiles"
           mkdir -p "$PROFILES_PATH"
           unzip $PROFILES_ZIP_PATH -d "$PROFILES_PATH"
-
           ASC_KEY_PATH=$RUNNER_TEMP/Key.p12
           echo -n "$ASC_KEY" | base64 --decode -o $ASC_KEY_PATH
-
           xcrun notarytool store-credentials "notarytool-password" \
             --key $ASC_KEY_PATH \
             --key-id $ASC_KEY_ID \
             --issuer $ASC_KEY_ISSUER_ID
-
           echo "ASC_KEY_PATH=$ASC_KEY_PATH" >> "$GITHUB_ENV"
           echo "ASC_KEY_ID=$ASC_KEY_ID" >> "$GITHUB_ENV"
           echo "ASC_KEY_ISSUER_ID=$ASC_KEY_ISSUER_ID" >> "$GITHUB_ENV"
@@ -592,7 +611,6 @@ jobs:
           cd "${{ matrix.archive }}"
           zip -r SFM.dSYMs.zip dSYMs
           popd
-
           mkdir -p dist
           cp clients/apple/SFM.dmg "dist/SFM-${VERSION}-universal.dmg"
           cp "clients/apple/${{ matrix.archive }}/SFM.dSYMs.zip" "dist/SFM-${VERSION}-universal.dSYMs.zip"
@@ -654,3 +672,4 @@ jobs:
           ghr --replace -p 5 "v${VERSION}" dist
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+Update build.yml · fengjiangjiang/sing-box@d409cd7
