@@ -25,6 +25,7 @@ const (
 	TypeTUIC               = "tuic"
 	TypeHysteria2          = "hysteria2"
 	TypeTailscale          = "tailscale"
+	TypeCloudflareTunnel = "cloudflare-tunnel"
 	TypeDERP               = "derp"
 	TypeResolved           = "resolved"
 	TypeSSMAPI             = "ssm-api"
@@ -90,6 +91,8 @@ func ProxyDisplayName(proxyType string) string {
 		return "AnyTLS"
 	case TypeTailscale:
 		return "Tailscale"
+	case TypeCloudflareTunnel:
+		return "Cloudflare Tunnel"
 	case TypeSelector:
 		return "Selector"
 	case TypeURLTest:
