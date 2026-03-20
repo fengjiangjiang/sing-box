@@ -1,10 +1,10 @@
-name: Build libbox.aar
+name: Build libbox.aar (Optimized)
 
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version name (optional, auto-detected if empty)"
+        description: "Version name (optional, auto-detected)"
         required: false
         type: string
       build_type:
@@ -13,22 +13,23 @@ on:
         type: choice
         default: "Android"
         options:
-          - Android   # Only build libbox.aar
-          # 可以添加其他，但这里只保留Android
+          - Android
+      abis:
+        description: "Android ABIs to build (comma-separated: arm64,arm,amd64,386)"
+        required: false
+        default: "arm64,arm"   # 默认覆盖99%设备
+        type: string
 
 jobs:
   build_libbox:
-    name: Build libbox.aar
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
           submodules: recursive
 
-      - name: Setup Go
-        uses: actions/setup-go@v5
+      - uses: actions/setup-go@v5
         with:
           go-version: '^1.25.3'
 
@@ -43,7 +44,6 @@ jobs:
           fi
 
       - name: Setup Android NDK
-        id: setup-ndk
         uses: nttld/setup-ndk@v1
         with:
           ndk-version: r28
@@ -54,14 +54,26 @@ jobs:
           sudo apt update && sudo apt install -y openjdk-17-jdk-headless
           java -version
 
-      - name: Install gomobile and dependencies
+      - name: Prepare gomobile
         run: |
-          make lib_install
-          echo "PATH=$(go env GOPATH)/bin:$PATH" >> $GITHUB_ENV
+          go install golang.org/x/mobile/cmd/gomobile@latest
+          gomobile init
 
-      - name: Build Android library (libbox.aar)
+      - name: Build optimized libbox.aar
         run: |
-          make lib_android
+          TARGETS=""
+          for abi in $(echo "${{ inputs.abis }}" | tr ',' ' '); do
+            case $abi in
+              arm64) TARGETS="$TARGETS android/arm64" ;;
+              arm)   TARGETS="$TARGETS android/arm" ;;
+              amd64) TARGETS="$TARGETS android/amd64" ;;
+              386)   TARGETS="$TARGETS android/386" ;;
+            esac
+          done
+          TARGETS=$(echo "$TARGETS" | tr ' ' ',')
+          echo "Building for targets: $TARGETS"
+
+          gomobile bind -v -ldflags '-s -w' -target="$TARGETS" ./libbox
         env:
           JAVA_HOME: /usr/lib/jvm/java-17-openjdk-amd64
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
