@@ -1,4 +1,4 @@
-name: Build libbox.aar (Optimized)
+name: Build libbox.aar (Optimized via post-strip)
 
 on:
   workflow_dispatch:
@@ -15,23 +15,25 @@ on:
         options:
           - Android
       abis:
-        description: "Android ABIs to build (comma-separated: arm64,arm,amd64,386)"
+        description: "Android ABIs to build (ignored, builds all by default)"
         required: false
-        default: "arm64,arm"
+        default: "all"
         type: string
 
 jobs:
   build_libbox:
     runs-on: ubuntu-latest
     env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true   # 可选，立即切换到 Node.js 24
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true   # 提前适配 Node.js 24，消除警告
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
           submodules: recursive
 
-      - uses: actions/setup-go@v5
+      - name: Setup Go
+        uses: actions/setup-go@v5
         with:
           go-version: '^1.25.3'
 
@@ -46,6 +48,7 @@ jobs:
           fi
 
       - name: Setup Android NDK
+        id: setup-ndk
         uses: nttld/setup-ndk@v1
         with:
           ndk-version: r28
@@ -56,50 +59,45 @@ jobs:
           sudo apt update && sudo apt install -y openjdk-17-jdk-headless
           java -version
 
-      - name: Prepare gomobile
+      - name: Build library (original method)
         run: |
-          go install golang.org/x/mobile/cmd/gomobile@latest
-          gomobile init
-
-      - name: Build optimized libbox.aar
-        run: |
-          # 确保 ANDROID_HOME 指向 NDK
-          if [ -d "$ANDROID_SDK_ROOT" ]; then
-            export ANDROID_HOME="$ANDROID_SDK_ROOT"
-          elif [ -d "$ANDROID_HOME" ]; then
-            export ANDROID_HOME="$ANDROID_HOME"
-          else
-            export ANDROID_HOME="$HOME/android-sdk"
-            mkdir -p "$ANDROID_HOME"
-            ln -s "$ANDROID_NDK_HOME" "$ANDROID_HOME/ndk-bundle"
-          fi
-
-          TARGETS=()
-          for abi in $(echo "${{ inputs.abis }}" | tr ',' ' '); do
-            case $abi in
-              arm64) TARGETS+=("android/arm64") ;;
-              arm)   TARGETS+=("android/arm") ;;
-              amd64) TARGETS+=("android/amd64") ;;
-              386)   TARGETS+=("android/386") ;;
-            esac
-          done
-
-          if [ ${#TARGETS[@]} -eq 0 ]; then
-            echo "No valid ABI specified, using default: arm64,arm"
-            TARGETS=("android/arm64" "android/arm")
-          fi
-
-          IFS=,
-          TARGET_STR="${TARGETS[*]}"
-          unset IFS
-          echo "Building for targets: $TARGET_STR"
-
-          gomobile bind -v -ldflags '-s -w' \
-            -target="$TARGET_STR" \
-            -androidapi 21 \
-            ./libbox
+          make lib_install
+          export PATH="$PATH:$(go env GOPATH)/bin"
+          make lib_android
         env:
           JAVA_HOME: /usr/lib/jvm/java-17-openjdk-amd64
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+
+      - name: Strip debug symbols from AAR
+        run: |
+          # 解压原始 AAR
+          mkdir aar_contents
+          cd aar_contents
+          unzip -q ../libbox.aar
+
+          # 获取 NDK 工具链路径
+          NDK_PATH="$ANDROID_NDK_HOME"
+
+          # 对每个 .so 文件进行 strip
+          find . -name "*.so" | while read so; do
+            # 确定 ABI 目录（如 arm64-v8a, armeabi-v7a, x86, x86_64）
+            abi=$(dirname "$so" | sed 's|^\./||')
+            case $abi in
+              arm64-v8a)  strip_cmd="$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android-strip" ;;
+              armeabi-v7a) strip_cmd="$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/bin/arm-linux-androideabi-strip" ;;
+              x86)        strip_cmd="$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/bin/i686-linux-android-strip" ;;
+              x86_64)     strip_cmd="$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android-strip" ;;
+              *) echo "Unknown ABI: $abi, skipping strip for $so"; continue ;;
+            esac
+            echo "Stripping $so with $strip_cmd"
+            "$strip_cmd" --strip-unneeded "$so"
+          done
+
+          # 重新打包 AAR（使用最大压缩）
+          zip -9 -r ../libbox_stripped.aar .
+          cd ..
+          mv libbox_stripped.aar libbox.aar
+        env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
 
       - name: Upload libbox.aar
