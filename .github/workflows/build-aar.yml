@@ -17,7 +17,7 @@ on:
       abis:
         description: "Android ABIs to build (comma-separated: arm64,arm,amd64,386)"
         required: false
-        default: "arm64,arm"   # 默认覆盖99%设备
+        default: "arm64,arm"
         type: string
 
 jobs:
@@ -61,19 +61,30 @@ jobs:
 
       - name: Build optimized libbox.aar
         run: |
-          TARGETS=""
+          # 将输入的 abis 转换为 gomobile target 列表
+          TARGETS=()
           for abi in $(echo "${{ inputs.abis }}" | tr ',' ' '); do
             case $abi in
-              arm64) TARGETS="$TARGETS android/arm64" ;;
-              arm)   TARGETS="$TARGETS android/arm" ;;
-              amd64) TARGETS="$TARGETS android/amd64" ;;
-              386)   TARGETS="$TARGETS android/386" ;;
+              arm64) TARGETS+=("android/arm64") ;;
+              arm)   TARGETS+=("android/arm") ;;
+              amd64) TARGETS+=("android/amd64") ;;
+              386)   TARGETS+=("android/386") ;;
             esac
           done
-          TARGETS=$(echo "$TARGETS" | tr ' ' ',')
-          echo "Building for targets: $TARGETS"
 
-          gomobile bind -v -ldflags '-s -w' -target="$TARGETS" ./libbox
+          # 如果没有指定任何有效 ABI，使用默认值
+          if [ ${#TARGETS[@]} -eq 0 ]; then
+            echo "No valid ABI specified, using default: arm64,arm"
+            TARGETS=("android/arm64" "android/arm")
+          fi
+
+          # 用逗号连接数组
+          IFS=,
+          TARGET_STR="${TARGETS[*]}"
+          unset IFS
+          echo "Building for targets: $TARGET_STR"
+
+          gomobile bind -v -ldflags '-s -w' -target="$TARGET_STR" ./libbox
         env:
           JAVA_HOME: /usr/lib/jvm/java-17-openjdk-amd64
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
