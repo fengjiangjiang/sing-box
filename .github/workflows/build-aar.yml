@@ -24,7 +24,7 @@ jobs:
   build_libbox:
     runs-on: ubuntu-latest
     env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true   # 可选，立即切换到 Node.js 24
     steps:
       - uses: actions/checkout@v4
         with:
@@ -63,7 +63,17 @@ jobs:
 
       - name: Build optimized libbox.aar
         run: |
-          # 将输入的 abis 转换为 gomobile target 列表
+          # 确保 ANDROID_HOME 指向 NDK
+          if [ -d "$ANDROID_SDK_ROOT" ]; then
+            export ANDROID_HOME="$ANDROID_SDK_ROOT"
+          elif [ -d "$ANDROID_HOME" ]; then
+            export ANDROID_HOME="$ANDROID_HOME"
+          else
+            export ANDROID_HOME="$HOME/android-sdk"
+            mkdir -p "$ANDROID_HOME"
+            ln -s "$ANDROID_NDK_HOME" "$ANDROID_HOME/ndk-bundle"
+          fi
+
           TARGETS=()
           for abi in $(echo "${{ inputs.abis }}" | tr ',' ' '); do
             case $abi in
@@ -74,19 +84,20 @@ jobs:
             esac
           done
 
-          # 如果没有指定任何有效 ABI，使用默认值
           if [ ${#TARGETS[@]} -eq 0 ]; then
             echo "No valid ABI specified, using default: arm64,arm"
             TARGETS=("android/arm64" "android/arm")
           fi
 
-          # 用逗号连接数组
           IFS=,
           TARGET_STR="${TARGETS[*]}"
           unset IFS
           echo "Building for targets: $TARGET_STR"
 
-          gomobile bind -v -ldflags '-s -w' -target="$TARGET_STR" ./libbox
+          gomobile bind -v -ldflags '-s -w' \
+            -target="$TARGET_STR" \
+            -androidapi 21 \
+            ./libbox
         env:
           JAVA_HOME: /usr/lib/jvm/java-17-openjdk-amd64
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
