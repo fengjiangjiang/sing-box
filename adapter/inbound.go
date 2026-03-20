@@ -2,10 +2,10 @@ package adapter
 
 import (
 	"context"
+	"net"
 	"net/netip"
 	"time"
 
-	"github.com/sagernet/sing-box/common/process"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
@@ -63,13 +63,10 @@ type InboundContext struct {
 	// cache
 
 	// Deprecated: implement in rule action
-	InboundDetour            string
-	LastInbound              string
-	OriginDestination        M.Socksaddr
-	RouteOriginalDestination M.Socksaddr
-	// Deprecated: to be removed
-	//nolint:staticcheck
-	InboundOptions            option.InboundOptions
+	InboundDetour             string
+	LastInbound               string
+	OriginDestination         M.Socksaddr
+	RouteOriginalDestination  M.Socksaddr
 	UDPDisableDomainUnmapping bool
 	UDPConnect                bool
 	UDPTimeout                time.Duration
@@ -85,7 +82,9 @@ type InboundContext struct {
 	DestinationAddresses []netip.Addr
 	SourceGeoIPCode      string
 	GeoIPCode            string
-	ProcessInfo          *process.Info
+	ProcessInfo          *ConnectionOwner
+	SourceMACAddress     net.HardwareAddr
+	SourceHostname       string
 	QueryType            uint16
 	FakeIP               bool
 

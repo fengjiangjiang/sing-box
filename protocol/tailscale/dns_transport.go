@@ -1,3 +1,5 @@
+//go:build with_gvisor
+
 package tailscale
 
 import (
@@ -7,7 +9,6 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
-	"reflect"
 	"strings"
 	"sync"
 
@@ -47,8 +48,6 @@ type DNSTransport struct {
 	acceptDefaultResolvers bool
 	dnsRouter              adapter.DNSRouter
 	endpointManager        adapter.EndpointManager
-	cfg                    *wgcfg.Config
-	dnsCfg                 *nDNS.Config
 	endpoint               *Endpoint
 	routePrefixes          []netip.Prefix
 	routes                 map[string][]adapter.DNSTransport
@@ -83,10 +82,10 @@ func (t *DNSTransport) Start(stage adapter.StartStage) error {
 	if !isTailscale {
 		return E.New("endpoint is not Tailscale: ", t.endpointTag)
 	}
-	if ep.onReconfig != nil {
+	if ep.onReconfigHook != nil {
 		return E.New("only one Tailscale DNS server is allowed for single endpoint")
 	}
-	ep.onReconfig = t.onReconfig
+	ep.onReconfigHook = t.onReconfig
 	t.endpoint = ep
 	return nil
 }
@@ -95,14 +94,6 @@ func (t *DNSTransport) Reset() {
 }
 
 func (t *DNSTransport) onReconfig(cfg *wgcfg.Config, routerCfg *router.Config, dnsCfg *nDNS.Config) {
-	if cfg == nil || dnsCfg == nil {
-		return
-	}
-	if (t.cfg != nil && reflect.DeepEqual(t.cfg, cfg)) && (t.dnsCfg != nil && reflect.DeepEqual(t.dnsCfg, dnsCfg)) {
-		return
-	}
-	t.cfg = cfg
-	t.dnsCfg = dnsCfg
 	err := t.updateDNSServers(routerCfg, dnsCfg)
 	if err != nil {
 		t.logger.Error(E.Cause(err, "update DNS servers"))
@@ -177,7 +168,7 @@ func (t *DNSTransport) createResolver(directDialer func() N.Dialer, resolver *dn
 			if serverAddr.Port == 0 {
 				serverAddr.Port = 443
 			}
-			tlsConfig := common.Must1(tls.NewClient(t.ctx, serverAddr.AddrString(), option.OutboundTLSOptions{
+			tlsConfig := common.Must1(tls.NewClient(t.ctx, t.logger, serverAddr.AddrString(), option.OutboundTLSOptions{
 				ALPN: []string{http2.NextProtoTLS, "http/1.1"},
 			}))
 			return transport.NewHTTPSRaw(t.TransportAdapter, t.logger, myDialer, serverURL, http.Header{}, serverAddr, tlsConfig), nil
@@ -296,7 +287,7 @@ type DNSDialer struct {
 }
 
 func (d *DNSDialer) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
-	if destination.IsFqdn() {
+	if destination.IsDomain() {
 		panic("invalid request here")
 	}
 	for _, prefix := range d.transport.routePrefixes {
@@ -308,7 +299,7 @@ func (d *DNSDialer) DialContext(ctx context.Context, network string, destination
 }
 
 func (d *DNSDialer) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
-	if destination.IsFqdn() {
+	if destination.IsDomain() {
 		panic("invalid request here")
 	}
 	for _, prefix := range d.transport.routePrefixes {

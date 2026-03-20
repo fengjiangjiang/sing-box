@@ -2,6 +2,17 @@
 icon: material/alert-decagram
 ---
 
+!!! quote "Changes in sing-box 1.14.0"
+
+    :material-plus: [source_mac_address](#source_mac_address)  
+    :material-plus: [source_hostname](#source_hostname)
+
+!!! quote "Changes in sing-box 1.13.0"
+
+    :material-plus: [interface_address](#interface_address)  
+    :material-plus: [network_interface_address](#network_interface_address)  
+    :material-plus: [default_interface_address](#default_interface_address)
+
 !!! quote "Changes in sing-box 1.12.0"
 
     :material-plus: [ip_accept_any](#ip_accept_any)  
@@ -130,6 +141,25 @@ icon: material/alert-decagram
         ],
         "network_is_expensive": false,
         "network_is_constrained": false,
+        "interface_address": {
+          "en0": [
+            "2000::/3"
+          ]
+        },
+        "network_interface_address": {
+          "wifi": [
+            "2000::/3"
+          ]
+        },
+        "default_interface_address": [
+          "2000::/3"
+        ],
+        "source_mac_address": [
+          "00:11:22:33:44:55"
+        ],
+        "source_hostname": [
+          "my-device"
+        ],
         "wifi_ssid": [
           "My WIFI"
         ],
@@ -359,11 +389,61 @@ such as Cellular or a Personal Hotspot (on Apple platforms).
 
 Match if network is in Low Data Mode.
 
-#### wifi_ssid
+#### interface_address
+
+!!! question "Since sing-box 1.13.0"
+
+!!! quote ""
+
+    Only supported on Linux, Windows, and macOS.
+
+Match interface address.
+
+#### network_interface_address
+
+!!! question "Since sing-box 1.13.0"
 
 !!! quote ""
 
     Only supported in graphical clients on Android and Apple platforms.
+
+Matches network interface (same values as `network_type`) address.
+
+#### default_interface_address
+
+!!! question "Since sing-box 1.13.0"
+
+!!! quote ""
+
+    Only supported on Linux, Windows, and macOS.
+
+Match default interface address.
+
+#### source_mac_address
+
+!!! question "Since sing-box 1.14.0"
+
+!!! quote ""
+
+    Only supported on Linux, macOS, or in graphical clients on Android and macOS. See [Neighbor Resolution](/configuration/shared/neighbor/) for setup.
+
+Match source device MAC address.
+
+#### source_hostname
+
+!!! question "Since sing-box 1.14.0"
+
+!!! quote ""
+
+    Only supported on Linux, macOS, or in graphical clients on Android and macOS. See [Neighbor Resolution](/configuration/shared/neighbor/) for setup.
+
+Match source device hostname from DHCP leases.
+
+#### wifi_ssid
+
+!!! quote ""
+
+    Only supported in graphical clients on Android and Apple platforms, or on Linux.
 
 Match WiFi SSID.
 
@@ -371,7 +451,7 @@ Match WiFi SSID.
 
 !!! quote ""
 
-    Only supported in graphical clients on Android and Apple platforms.
+    Only supported in graphical clients on Android and Apple platforms, or on Linux.
 
 Match WiFi BSSID.
 
