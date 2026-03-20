@@ -4,9 +4,17 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version name (optional, auto-detected if empty)'
+        description: "Version name (optional, auto-detected if empty)"
         required: false
         type: string
+      build_type:
+        description: "Build type"
+        required: true
+        type: choice
+        default: "Android"
+        options:
+          - Android   # Only build libbox.aar
+          # 可以添加其他，但这里只保留Android
 
 jobs:
   build_libbox:
@@ -31,7 +39,6 @@ jobs:
             echo "version=${{ inputs.version }}" >> $GITHUB_OUTPUT
           else
             go run -v ./cmd/internal/read_tag --ci --nightly
-            # read_tag 会设置环境变量 version，将其输出到 GITHUB_OUTPUT
             echo "version=$version" >> $GITHUB_OUTPUT
           fi
 
