@@ -65,37 +65,6 @@ jobs:
           JAVA_HOME: /usr/lib/jvm/java-17-openjdk-amd64
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
 
-      # ---------- 新增：去除调试信息，重新打包 ----------
-      - name: Strip debug symbols from AAR
-        run: |
-          # 解压原始 AAR
-          mkdir aar_contents
-          cd aar_contents
-          unzip -q ../libbox.aar
-
-          NDK_PATH="$ANDROID_NDK_HOME"
-          # 对每个 .so 文件进行 strip
-          find . -name "*.so" | while read so; do
-            # 确定 ABI 目录（如 arm64-v8a, armeabi-v7a, x86, x86_64）
-            abi=$(dirname "$so" | sed 's|^\./||')
-            case $abi in
-              arm64-v8a)  strip_cmd="$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android-strip" ;;
-              armeabi-v7a) strip_cmd="$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/bin/arm-linux-androideabi-strip" ;;
-              x86)        strip_cmd="$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/bin/i686-linux-android-strip" ;;
-              x86_64)     strip_cmd="$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android-strip" ;;
-              *) echo "Unknown ABI: $abi, skipping strip for $so"; continue ;;
-            esac
-            echo "Stripping $so with $strip_cmd"
-            "$strip_cmd" --strip-unneeded "$so"
-          done
-
-          # 重新打包 AAR（使用最大压缩）
-          zip -9 -r ../libbox_stripped.aar .
-          cd ..
-          mv libbox_stripped.aar libbox.aar
-        env:
-          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
-
       - name: Upload libbox.aar
         uses: actions/upload-artifact@v4
         with:
