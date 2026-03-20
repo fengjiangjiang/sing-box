@@ -1,10 +1,10 @@
-name: Build libbox.aar (Optimized via post-strip)
+name: Build libbox.aar
 
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version name (optional, auto-detected)"
+        description: "Version name (optional, auto-detected if empty)"
         required: false
         type: string
       build_type:
@@ -13,18 +13,12 @@ on:
         type: choice
         default: "Android"
         options:
-          - Android
-      abis:
-        description: "Android ABIs to build (ignored, builds all by default)"
-        required: false
-        default: "all"
-        type: string
+          - Android   # 仅构建 libbox.aar
 
 jobs:
   build_libbox:
+    name: Build libbox.aar
     runs-on: ubuntu-latest
-    env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true   # 提前适配 Node.js 24，消除警告
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -59,15 +53,19 @@ jobs:
           sudo apt update && sudo apt install -y openjdk-17-jdk-headless
           java -version
 
-      - name: Build library (original method)
+      - name: Install gomobile and dependencies
         run: |
           make lib_install
-          export PATH="$PATH:$(go env GOPATH)/bin"
+          echo "PATH=$(go env GOPATH)/bin:$PATH" >> $GITHUB_ENV
+
+      - name: Build Android library (libbox.aar)
+        run: |
           make lib_android
         env:
           JAVA_HOME: /usr/lib/jvm/java-17-openjdk-amd64
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
 
+      # ---------- 新增：去除调试信息，重新打包 ----------
       - name: Strip debug symbols from AAR
         run: |
           # 解压原始 AAR
@@ -75,9 +73,7 @@ jobs:
           cd aar_contents
           unzip -q ../libbox.aar
 
-          # 获取 NDK 工具链路径
           NDK_PATH="$ANDROID_NDK_HOME"
-
           # 对每个 .so 文件进行 strip
           find . -name "*.so" | while read so; do
             # 确定 ABI 目录（如 arm64-v8a, armeabi-v7a, x86, x86_64）
