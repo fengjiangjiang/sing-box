@@ -150,14 +150,6 @@ func (i *Inbound) resolveHTTPService(requestURL string) (ResolvedService, string
 	if !loaded {
 		return ResolvedService{}, "", E.New("no ingress rule matched request host/path")
 	}
-	if service.Kind == ResolvedServiceHelloWorld {
-		helloURL, err := i.ensureHelloWorldURL()
-		if err != nil {
-			return ResolvedService{}, "", err
-		}
-		service.BaseURL = helloURL
-		service.OriginRequest.NoTLSVerify = true
-	}
 	originURL, err := service.BuildRequestURL(requestURL)
 	if err != nil {
 		return ResolvedService{}, "", E.Cause(err, "build origin request URL")
@@ -266,7 +258,7 @@ func (i *Inbound) handleHTTPService(ctx context.Context, stream io.ReadWriteClos
 			return
 		}
 		i.handleStreamService(ctx, stream, respWriter, request, metadata, service)
-	case ResolvedServiceUnix, ResolvedServiceUnixTLS, ResolvedServiceHelloWorld:
+	case ResolvedServiceUnix, ResolvedServiceUnixTLS:
 		if request.Type == ConnectionTypeHTTP {
 			i.handleDirectHTTPStream(ctx, stream, respWriter, request, metadata, service)
 		} else {
@@ -438,11 +430,6 @@ func (i *Inbound) newDirectOriginTransport(service ResolvedService, requestHost 
 	case ResolvedServiceUnix, ResolvedServiceUnixTLS:
 		transport.DialContext = func(ctx context.Context, _, _ string) (net.Conn, error) {
 			return dialer.DialContext(ctx, "unix", service.UnixPath)
-		}
-	case ResolvedServiceHelloWorld:
-		target := service.BaseURL.Host
-		transport.DialContext = func(ctx context.Context, _, _ string) (net.Conn, error) {
-			return dialer.DialContext(ctx, "tcp", target)
 		}
 	default:
 		return nil, nil, E.New("unsupported direct origin service")

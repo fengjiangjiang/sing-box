@@ -35,7 +35,6 @@ const (
 	ResolvedServiceHTTP ResolvedServiceKind = iota
 	ResolvedServiceStream
 	ResolvedServiceStatus
-	ResolvedServiceHelloWorld
 	ResolvedServiceUnix
 	ResolvedServiceUnixTLS
 	ResolvedServiceBastion
@@ -60,20 +59,6 @@ func (s ResolvedService) RouterControlled() bool {
 func (s ResolvedService) BuildRequestURL(requestURL string) (string, error) {
 	switch s.Kind {
 	case ResolvedServiceHTTP, ResolvedServiceUnix, ResolvedServiceUnixTLS:
-		requestParsed, err := url.Parse(requestURL)
-		if err != nil {
-			return "", err
-		}
-		originURL := *s.BaseURL
-		originURL.Path = requestParsed.Path
-		originURL.RawPath = requestParsed.RawPath
-		originURL.RawQuery = requestParsed.RawQuery
-		originURL.Fragment = requestParsed.Fragment
-		return originURL.String(), nil
-	case ResolvedServiceHelloWorld:
-		if s.BaseURL == nil {
-			return "", E.New("hello world service is unavailable")
-		}
 		requestParsed, err := url.Parse(requestURL)
 		if err != nil {
 			return "", err
@@ -413,11 +398,7 @@ func parseResolvedService(rawService string, originRequest OriginRequestConfig) 
 			OriginRequest: originRequest,
 		}, nil
 	case rawService == "hello_world" || rawService == "hello-world":
-		return ResolvedService{
-			Kind:          ResolvedServiceHelloWorld,
-			Service:       rawService,
-			OriginRequest: originRequest,
-		}, nil
+		return ResolvedService{}, E.New("unsupported ingress service: hello_world")
 	case rawService == "bastion":
 		return ResolvedService{
 			Kind:          ResolvedServiceBastion,

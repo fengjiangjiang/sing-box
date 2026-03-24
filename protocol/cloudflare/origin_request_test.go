@@ -58,11 +58,8 @@ func TestApplyHTTPTransportProxy(t *testing.T) {
 func TestNewDirectOriginTransportNoHappyEyeballs(t *testing.T) {
 	inbound := &Inbound{}
 	transport, cleanup, err := inbound.newDirectOriginTransport(ResolvedService{
-		Kind: ResolvedServiceHelloWorld,
-		BaseURL: &url.URL{
-			Scheme: "http",
-			Host:   "127.0.0.1:8080",
-		},
+		Kind:     ResolvedServiceUnix,
+		UnixPath: "/tmp/test.sock",
 		OriginRequest: OriginRequestConfig{
 			NoHappyEyeballs: true,
 		},

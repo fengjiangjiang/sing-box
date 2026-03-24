@@ -4,21 +4,16 @@ package cloudflare
 
 import (
 	"context"
-	stdTLS "crypto/tls"
 	"encoding/base64"
 	"errors"
 	"io"
 	"math/rand"
-	"net"
-	"net/http"
-	"net/url"
 	"sync"
 	"time"
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/inbound"
 	boxDialer "github.com/sagernet/sing-box/common/dialer"
-	boxTLS "github.com/sagernet/sing-box/common/tls"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
@@ -62,10 +57,6 @@ type Inbound struct {
 	datagramV2Muxers    map[DatagramSender]*DatagramV2Muxer
 	datagramV3Muxers    map[DatagramSender]*DatagramV3Muxer
 	datagramV3Manager   *DatagramV3SessionManager
-
-	helloWorldAccess sync.Mutex
-	helloWorldServer *http.Server
-	helloWorldURL    *url.URL
 
 	connectedAccess  sync.Mutex
 	connectedIndices map[uint8]struct{}
@@ -231,47 +222,7 @@ func (i *Inbound) Close() error {
 	}
 	i.connections = nil
 	i.connectionAccess.Unlock()
-	if i.helloWorldServer != nil {
-		i.helloWorldServer.Close()
-	}
 	return nil
-}
-
-func (i *Inbound) ensureHelloWorldURL() (*url.URL, error) {
-	i.helloWorldAccess.Lock()
-	defer i.helloWorldAccess.Unlock()
-	if i.helloWorldURL != nil {
-		return i.helloWorldURL, nil
-	}
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("/", func(writer http.ResponseWriter, request *http.Request) {
-		writer.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		writer.WriteHeader(http.StatusOK)
-		_, _ = writer.Write([]byte("Hello World"))
-	})
-
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		return nil, E.Cause(err, "listen hello world server")
-	}
-	certificate, err := boxTLS.GenerateKeyPair(nil, nil, time.Now, "localhost")
-	if err != nil {
-		_ = listener.Close()
-		return nil, E.Cause(err, "generate hello world certificate")
-	}
-	tlsListener := stdTLS.NewListener(listener, &stdTLS.Config{
-		Certificates: []stdTLS.Certificate{*certificate},
-	})
-	server := &http.Server{Handler: mux}
-	go server.Serve(tlsListener)
-
-	i.helloWorldServer = server
-	i.helloWorldURL = &url.URL{
-		Scheme: "https",
-		Host:   listener.Addr().String(),
-	}
-	return i.helloWorldURL, nil
 }
 
 const (
