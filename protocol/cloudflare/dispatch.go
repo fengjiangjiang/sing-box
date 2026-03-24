@@ -220,6 +220,22 @@ func (i *Inbound) handleHTTPService(ctx context.Context, stream io.ReadWriteClos
 		} else {
 			i.handleDirectWebSocketStream(ctx, stream, respWriter, request, metadata, service)
 		}
+	case ResolvedServiceBastion:
+		if request.Type != ConnectionTypeWebsocket {
+			err := E.New("bastion service requires websocket request type")
+			i.logger.ErrorContext(ctx, err)
+			respWriter.WriteResponse(err, nil)
+			return
+		}
+		i.handleBastionStream(ctx, stream, respWriter, request, metadata)
+	case ResolvedServiceSocksProxy:
+		if request.Type != ConnectionTypeWebsocket {
+			err := E.New("socks-proxy service requires websocket request type")
+			i.logger.ErrorContext(ctx, err)
+			respWriter.WriteResponse(err, nil)
+			return
+		}
+		i.handleSocksProxyStream(ctx, stream, respWriter, request, metadata)
 	default:
 		err := E.New("unsupported service kind for HTTP/WebSocket request")
 		i.logger.ErrorContext(ctx, err)

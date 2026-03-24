@@ -39,6 +39,8 @@ const (
 	ResolvedServiceHelloWorld
 	ResolvedServiceUnix
 	ResolvedServiceUnixTLS
+	ResolvedServiceBastion
+	ResolvedServiceSocksProxy
 )
 
 type ResolvedService struct {
@@ -392,6 +394,13 @@ func compileIngressRules(defaultOriginRequest OriginRequestConfig, rawRules []lo
 func parseResolvedService(rawService string, originRequest OriginRequestConfig) (ResolvedService, error) {
 	switch {
 	case rawService == "":
+		if originRequest.BastionMode {
+			return ResolvedService{
+				Kind:          ResolvedServiceBastion,
+				Service:       "bastion",
+				OriginRequest: originRequest,
+			}, nil
+		}
 		return ResolvedService{}, E.New("missing ingress service")
 	case strings.HasPrefix(rawService, "http_status:"):
 		statusCode, err := strconv.Atoi(strings.TrimPrefix(rawService, "http_status:"))
@@ -410,6 +419,18 @@ func parseResolvedService(rawService string, originRequest OriginRequestConfig) 
 	case rawService == "hello_world" || rawService == "hello-world":
 		return ResolvedService{
 			Kind:          ResolvedServiceHelloWorld,
+			Service:       rawService,
+			OriginRequest: originRequest,
+		}, nil
+	case rawService == "bastion":
+		return ResolvedService{
+			Kind:          ResolvedServiceBastion,
+			Service:       rawService,
+			OriginRequest: originRequest,
+		}, nil
+	case rawService == "socks-proxy":
+		return ResolvedService{
+			Kind:          ResolvedServiceSocksProxy,
 			Service:       rawService,
 			OriginRequest: originRequest,
 		}, nil
