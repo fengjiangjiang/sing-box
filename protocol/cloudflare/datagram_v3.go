@@ -120,7 +120,7 @@ func (m *DatagramV3Muxer) handleRegistration(ctx context.Context, data []byte) {
 
 	if flags&v3FlagIPv6 != 0 {
 		if len(data) < offset+v3IPv6AddrLen {
-			m.logger.Debug("V3 registration too short for IPv6")
+			m.sendRegistrationResponse(requestID, v3ResponseErrorWithMsg, "registration too short for IPv6")
 			return
 		}
 		var addr [16]byte
@@ -129,7 +129,7 @@ func (m *DatagramV3Muxer) handleRegistration(ctx context.Context, data []byte) {
 		offset += v3IPv6AddrLen
 	} else {
 		if len(data) < offset+v3IPv4AddrLen {
-			m.logger.Debug("V3 registration too short for IPv4")
+			m.sendRegistrationResponse(requestID, v3ResponseErrorWithMsg, "registration too short for IPv4")
 			return
 		}
 		var addr [4]byte
