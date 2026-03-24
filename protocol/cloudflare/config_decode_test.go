@@ -26,3 +26,13 @@ func TestValidateRegistrationResultRejectsNonRemoteManaged(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
+
+func TestNormalizeProtocolAcceptsAuto(t *testing.T) {
+	protocol, err := normalizeProtocol("auto")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if protocol != "" {
+		t.Fatalf("expected auto protocol to normalize to empty string, got %q", protocol)
+	}
+}

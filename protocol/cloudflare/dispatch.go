@@ -265,7 +265,7 @@ func (i *Inbound) handleHTTPService(ctx context.Context, stream io.ReadWriteClos
 			respWriter.WriteResponse(err, nil)
 			return
 		}
-		i.handleStreamService(ctx, stream, respWriter, request, metadata, service.Destination)
+		i.handleStreamService(ctx, stream, respWriter, request, metadata, service)
 	case ResolvedServiceUnix, ResolvedServiceUnixTLS, ResolvedServiceHelloWorld:
 		if request.Type == ConnectionTypeHTTP {
 			i.handleDirectHTTPStream(ctx, stream, respWriter, request, metadata, service)
@@ -279,7 +279,7 @@ func (i *Inbound) handleHTTPService(ctx context.Context, stream io.ReadWriteClos
 			respWriter.WriteResponse(err, nil)
 			return
 		}
-		i.handleBastionStream(ctx, stream, respWriter, request, metadata)
+		i.handleBastionStream(ctx, stream, respWriter, request, metadata, service)
 	case ResolvedServiceSocksProxy:
 		if request.Type != ConnectionTypeWebsocket {
 			err := E.New("socks-proxy service requires websocket request type")

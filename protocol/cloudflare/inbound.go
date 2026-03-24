@@ -86,9 +86,9 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 		haConnections = 4
 	}
 
-	protocol := options.Protocol
-	if protocol != "" && protocol != "quic" && protocol != "http2" {
-		return nil, E.New("unsupported protocol: ", protocol, ", expected quic or http2")
+	protocol, err := normalizeProtocol(options.Protocol)
+	if err != nil {
+		return nil, err
 	}
 
 	edgeIPVersion := options.EdgeIPVersion
@@ -283,6 +283,7 @@ const (
 func (i *Inbound) superviseConnection(connIndex uint8, edgeAddrs []*EdgeAddr, features []string) {
 	defer i.done.Done()
 
+	edgeIndex := initialEdgeAddrIndex(connIndex, len(edgeAddrs))
 	retries := 0
 	for {
 		select {
@@ -291,7 +292,7 @@ func (i *Inbound) superviseConnection(connIndex uint8, edgeAddrs []*EdgeAddr, fe
 		default:
 		}
 
-		edgeAddr := edgeAddrs[rand.Intn(len(edgeAddrs))]
+		edgeAddr := edgeAddrs[edgeIndex]
 		err := i.serveConnection(connIndex, edgeAddr, features, uint8(retries))
 		if err == nil || i.ctx.Err() != nil {
 			return
@@ -303,6 +304,7 @@ func (i *Inbound) superviseConnection(connIndex uint8, edgeAddrs []*EdgeAddr, fe
 		}
 
 		retries++
+		edgeIndex = rotateEdgeAddrIndex(edgeIndex, len(edgeAddrs))
 		backoff := backoffDuration(retries)
 		var retryableErr *RetryableError
 		if errors.As(err, &retryableErr) && retryableErr.Delay > 0 {
@@ -410,6 +412,20 @@ func backoffDuration(retries int) time.Duration {
 	return backoff/2 + jitter
 }
 
+func initialEdgeAddrIndex(connIndex uint8, size int) int {
+	if size <= 1 {
+		return 0
+	}
+	return int(connIndex) % size
+}
+
+func rotateEdgeAddrIndex(current int, size int) int {
+	if size <= 1 {
+		return 0
+	}
+	return (current + 1) % size
+}
+
 func flattenRegions(regions [][]*EdgeAddr) []*EdgeAddr {
 	var result []*EdgeAddr
 	for _, region := range regions {
@@ -429,4 +445,14 @@ func parseToken(token string) (Credentials, error) {
 		return Credentials{}, E.Cause(err, "unmarshal token")
 	}
 	return tunnelToken.ToCredentials(), nil
+}
+
+func normalizeProtocol(protocol string) (string, error) {
+	if protocol == "auto" {
+		return "", nil
+	}
+	if protocol != "" && protocol != "quic" && protocol != "http2" {
+		return "", E.New("unsupported protocol: ", protocol, ", expected auto, quic or http2")
+	}
+	return protocol, nil
 }

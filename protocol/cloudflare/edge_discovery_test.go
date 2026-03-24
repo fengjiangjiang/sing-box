@@ -97,3 +97,30 @@ func TestGetRegionalServiceName(t *testing.T) {
 		t.Fatalf("expected regional service us-%s, got %s", edgeSRVService, got)
 	}
 }
+
+func TestInitialEdgeAddrIndex(t *testing.T) {
+	if got := initialEdgeAddrIndex(0, 4); got != 0 {
+		t.Fatalf("expected conn 0 to get index 0, got %d", got)
+	}
+	if got := initialEdgeAddrIndex(3, 4); got != 3 {
+		t.Fatalf("expected conn 3 to get index 3, got %d", got)
+	}
+	if got := initialEdgeAddrIndex(5, 4); got != 1 {
+		t.Fatalf("expected conn 5 to wrap to index 1, got %d", got)
+	}
+	if got := initialEdgeAddrIndex(2, 1); got != 0 {
+		t.Fatalf("expected single-address pool to always return 0, got %d", got)
+	}
+}
+
+func TestRotateEdgeAddrIndex(t *testing.T) {
+	if got := rotateEdgeAddrIndex(0, 4); got != 1 {
+		t.Fatalf("expected index 0 to rotate to 1, got %d", got)
+	}
+	if got := rotateEdgeAddrIndex(3, 4); got != 0 {
+		t.Fatalf("expected last index to wrap to 0, got %d", got)
+	}
+	if got := rotateEdgeAddrIndex(0, 1); got != 0 {
+		t.Fatalf("expected single-address pool to stay at 0, got %d", got)
+	}
+}

@@ -201,7 +201,7 @@ func TestHandleBastionStream(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		inboundInstance.handleBastionStream(context.Background(), serverSide, respWriter, request, adapter.InboundContext{})
+		inboundInstance.handleBastionStream(context.Background(), serverSide, respWriter, request, adapter.InboundContext{}, ResolvedService{})
 	}()
 
 	select {
@@ -438,7 +438,10 @@ func TestHandleStreamService(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		inboundInstance.handleStreamService(context.Background(), serverSide, respWriter, request, adapter.InboundContext{}, M.ParseSocksaddr(listener.Addr().String()))
+		inboundInstance.handleStreamService(context.Background(), serverSide, respWriter, request, adapter.InboundContext{}, ResolvedService{
+			Kind:        ResolvedServiceStream,
+			Destination: M.ParseSocksaddr(listener.Addr().String()),
+		})
 	}()
 
 	select {
@@ -471,5 +474,69 @@ func TestHandleStreamService(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("stream service did not exit")
+	}
+}
+
+func TestHandleStreamServiceProxyTypeSocks(t *testing.T) {
+	listener := startEchoListener(t)
+	defer listener.Close()
+
+	serverSide, clientSide := net.Pipe()
+	defer clientSide.Close()
+
+	inboundInstance := newSpecialServiceInbound(t)
+	request := &ConnectRequest{
+		Type: ConnectionTypeWebsocket,
+		Metadata: []Metadata{
+			{Key: metadataHTTPHeader + ":Sec-WebSocket-Key", Val: "dGhlIHNhbXBsZSBub25jZQ=="},
+		},
+	}
+	respWriter := &fakeConnectResponseWriter{done: make(chan struct{})}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		inboundInstance.handleStreamService(context.Background(), serverSide, respWriter, request, adapter.InboundContext{}, ResolvedService{
+			Kind:        ResolvedServiceStream,
+			Destination: M.ParseSocksaddr(listener.Addr().String()),
+			OriginRequest: OriginRequestConfig{
+				ProxyType: "socks",
+			},
+		})
+	}()
+
+	select {
+	case <-respWriter.done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for stream service connect response")
+	}
+	if respWriter.err != nil {
+		t.Fatal(respWriter.err)
+	}
+	if respWriter.status != http.StatusSwitchingProtocols {
+		t.Fatalf("expected 101 response, got %d", respWriter.status)
+	}
+
+	writeSocksAuth(t, clientSide)
+	data := writeSocksConnectIPv4(t, clientSide, listener.Addr().String())
+	if len(data) != 10 || data[1] != socksReplySuccess {
+		t.Fatalf("unexpected socks connect response: %v", data)
+	}
+
+	if err := wsutil.WriteClientMessage(clientSide, ws.OpBinary, []byte("hello")); err != nil {
+		t.Fatal(err)
+	}
+	data, _, err := wsutil.ReadServerData(clientSide)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "hello" {
+		t.Fatalf("expected echoed payload, got %q", string(data))
+	}
+	_ = clientSide.Close()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("socks stream service did not exit")
 	}
 }

@@ -32,20 +32,20 @@ const (
 	socksReplyCommandNotSupported = 7
 )
 
-func (i *Inbound) handleBastionStream(ctx context.Context, stream io.ReadWriteCloser, respWriter ConnectResponseWriter, request *ConnectRequest, metadata adapter.InboundContext) {
+func (i *Inbound) handleBastionStream(ctx context.Context, stream io.ReadWriteCloser, respWriter ConnectResponseWriter, request *ConnectRequest, metadata adapter.InboundContext, service ResolvedService) {
 	destination, err := resolveBastionDestination(request)
 	if err != nil {
 		respWriter.WriteResponse(err, nil)
 		return
 	}
-	i.handleRouterBackedStream(ctx, stream, respWriter, request, M.ParseSocksaddr(destination))
+	i.handleRouterBackedStream(ctx, stream, respWriter, request, M.ParseSocksaddr(destination), service.OriginRequest.ProxyType)
 }
 
-func (i *Inbound) handleStreamService(ctx context.Context, stream io.ReadWriteCloser, respWriter ConnectResponseWriter, request *ConnectRequest, metadata adapter.InboundContext, destination M.Socksaddr) {
-	i.handleRouterBackedStream(ctx, stream, respWriter, request, destination)
+func (i *Inbound) handleStreamService(ctx context.Context, stream io.ReadWriteCloser, respWriter ConnectResponseWriter, request *ConnectRequest, metadata adapter.InboundContext, service ResolvedService) {
+	i.handleRouterBackedStream(ctx, stream, respWriter, request, service.Destination, service.OriginRequest.ProxyType)
 }
 
-func (i *Inbound) handleRouterBackedStream(ctx context.Context, stream io.ReadWriteCloser, respWriter ConnectResponseWriter, request *ConnectRequest, destination M.Socksaddr) {
+func (i *Inbound) handleRouterBackedStream(ctx context.Context, stream io.ReadWriteCloser, respWriter ConnectResponseWriter, request *ConnectRequest, destination M.Socksaddr, proxyType string) {
 	targetConn, cleanup, err := i.dialRouterTCP(ctx, destination)
 	if err != nil {
 		respWriter.WriteResponse(err, nil)
@@ -61,6 +61,12 @@ func (i *Inbound) handleRouterBackedStream(ctx context.Context, stream io.ReadWr
 
 	wsConn := v2raywebsocket.NewConn(newStreamConn(stream), nil, ws.StateServerSide)
 	defer wsConn.Close()
+	if isSocksProxyType(proxyType) {
+		if err := serveFixedSocksStream(ctx, wsConn, targetConn); err != nil && !E.IsClosedOrCanceled(err) {
+			i.logger.DebugContext(ctx, "socks-over-websocket stream closed: ", err)
+		}
+		return
+	}
 	_ = bufio.CopyConn(ctx, wsConn, targetConn)
 }
 
@@ -99,6 +105,67 @@ func websocketResponseHeaders(request *ConnectRequest) http.Header {
 		header.Set("Sec-WebSocket-Accept", base64.StdEncoding.EncodeToString(sum[:]))
 	}
 	return header
+}
+
+func isSocksProxyType(proxyType string) bool {
+	lower := strings.ToLower(strings.TrimSpace(proxyType))
+	return lower == "socks" || lower == "socks5"
+}
+
+func serveFixedSocksStream(ctx context.Context, conn net.Conn, targetConn net.Conn) error {
+	version := make([]byte, 1)
+	if _, err := io.ReadFull(conn, version); err != nil {
+		return err
+	}
+	if version[0] != 5 {
+		return E.New("unsupported SOCKS version: ", version[0])
+	}
+
+	methodCount := make([]byte, 1)
+	if _, err := io.ReadFull(conn, methodCount); err != nil {
+		return err
+	}
+	methods := make([]byte, int(methodCount[0]))
+	if _, err := io.ReadFull(conn, methods); err != nil {
+		return err
+	}
+
+	var supportsNoAuth bool
+	for _, method := range methods {
+		if method == 0 {
+			supportsNoAuth = true
+			break
+		}
+	}
+	if !supportsNoAuth {
+		_, err := conn.Write([]byte{5, 255})
+		if err != nil {
+			return err
+		}
+		return E.New("unknown authentication type")
+	}
+	if _, err := conn.Write([]byte{5, 0}); err != nil {
+		return err
+	}
+
+	requestHeader := make([]byte, 4)
+	if _, err := io.ReadFull(conn, requestHeader); err != nil {
+		return err
+	}
+	if requestHeader[0] != 5 {
+		return E.New("unsupported SOCKS request version: ", requestHeader[0])
+	}
+	if requestHeader[1] != 1 {
+		_ = writeSocksReply(conn, socksReplyCommandNotSupported)
+		return E.New("unsupported SOCKS command: ", requestHeader[1])
+	}
+	if _, err := readSocksDestination(conn, requestHeader[3]); err != nil {
+		return err
+	}
+	if err := writeSocksReply(conn, socksReplySuccess); err != nil {
+		return err
+	}
+	return bufio.CopyConn(ctx, conn, targetConn)
 }
 
 func requestHeaderValue(request *ConnectRequest, headerName string) string {
