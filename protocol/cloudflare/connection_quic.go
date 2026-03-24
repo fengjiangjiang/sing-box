@@ -5,8 +5,10 @@ package cloudflare
 import (
 	"context"
 	"crypto/tls"
+	"fmt"
 	"io"
 	"net"
+	"runtime"
 	"sync"
 	"time"
 
@@ -36,7 +38,7 @@ func quicInitialPacketSize(ipVersion int) uint16 {
 
 // QUICConnection manages a single QUIC connection to the Cloudflare edge.
 type QUICConnection struct {
-	conn                *quic.Conn
+	conn                quicConnection
 	logger              log.ContextLogger
 	edgeAddr            *EdgeAddr
 	connIndex           uint8
@@ -50,6 +52,31 @@ type QUICConnection struct {
 
 	closeOnce sync.Once
 }
+
+type quicConnection interface {
+	OpenStream() (*quic.Stream, error)
+	AcceptStream(ctx context.Context) (*quic.Stream, error)
+	ReceiveDatagram(ctx context.Context) ([]byte, error)
+	SendDatagram(data []byte) error
+	LocalAddr() net.Addr
+	CloseWithError(code quic.ApplicationErrorCode, reason string) error
+}
+
+type closeableQUICConn struct {
+	*quic.Conn
+	udpConn *net.UDPConn
+}
+
+func (c *closeableQUICConn) CloseWithError(code quic.ApplicationErrorCode, reason string) error {
+	err := c.Conn.CloseWithError(code, reason)
+	_ = c.udpConn.Close()
+	return err
+}
+
+var (
+	quicPortByConnIndex = make(map[uint8]int)
+	quicPortAccess      sync.Mutex
+)
 
 // NewQUICConnection dials the edge and establishes a QUIC connection.
 func NewQUICConnection(
@@ -69,10 +96,9 @@ func NewQUICConnection(
 	}
 
 	tlsConfig := &tls.Config{
-		RootCAs:          rootCAs,
-		ServerName:       quicEdgeSNI,
-		NextProtos:       []string{quicEdgeALPN},
-		CurvePreferences: []tls.CurveID{tls.CurveP256},
+		RootCAs:    rootCAs,
+		ServerName: quicEdgeSNI,
+		NextProtos: []string{quicEdgeALPN},
 	}
 
 	quicConfig := &quic.Config{
@@ -85,13 +111,19 @@ func NewQUICConnection(
 		InitialPacketSize:     quicInitialPacketSize(edgeAddr.IPVersion),
 	}
 
-	conn, err := quic.DialAddr(ctx, edgeAddr.UDP.String(), tlsConfig, quicConfig)
+	udpConn, err := createUDPConnForConnIndex(connIndex, edgeAddr)
 	if err != nil {
+		return nil, E.Cause(err, "listen UDP for QUIC edge")
+	}
+
+	conn, err := quic.Dial(ctx, udpConn, edgeAddr.UDP, tlsConfig, quicConfig)
+	if err != nil {
+		udpConn.Close()
 		return nil, E.Cause(err, "dial QUIC edge")
 	}
 
 	return &QUICConnection{
-		conn:                conn,
+		conn:                &closeableQUICConn{Conn: conn, udpConn: udpConn},
 		logger:              logger,
 		edgeAddr:            edgeAddr,
 		connIndex:           connIndex,
@@ -101,6 +133,39 @@ func NewQUICConnection(
 		numPreviousAttempts: numPreviousAttempts,
 		gracePeriod:         gracePeriod,
 	}, nil
+}
+
+func createUDPConnForConnIndex(connIndex uint8, edgeAddr *EdgeAddr) (*net.UDPConn, error) {
+	quicPortAccess.Lock()
+	defer quicPortAccess.Unlock()
+
+	network := "udp"
+	if runtime.GOOS == "darwin" {
+		if edgeAddr.IPVersion == 4 {
+			network = "udp4"
+		} else {
+			network = "udp6"
+		}
+	}
+
+	if port, loaded := quicPortByConnIndex[connIndex]; loaded {
+		udpConn, err := net.ListenUDP(network, &net.UDPAddr{Port: port})
+		if err == nil {
+			return udpConn, nil
+		}
+	}
+
+	udpConn, err := net.ListenUDP(network, &net.UDPAddr{Port: 0})
+	if err != nil {
+		return nil, err
+	}
+	udpAddr, ok := udpConn.LocalAddr().(*net.UDPAddr)
+	if !ok {
+		udpConn.Close()
+		return nil, fmt.Errorf("unexpected local UDP address type %T", udpConn.LocalAddr())
+	}
+	quicPortByConnIndex[connIndex] = udpAddr.Port
+	return udpConn, nil
 }
 
 // Serve runs the QUIC connection: registers, accepts streams, handles datagrams.

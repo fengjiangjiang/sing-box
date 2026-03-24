@@ -268,7 +268,12 @@ func (i *Inbound) serveConnection(connIndex uint8, edgeAddr *EdgeAddr, features 
 
 	switch protocol {
 	case "quic":
-		return i.serveQUIC(connIndex, edgeAddr, features, numPreviousAttempts)
+		err := i.serveQUIC(connIndex, edgeAddr, features, numPreviousAttempts)
+		if err == nil || i.ctx.Err() != nil {
+			return err
+		}
+		i.logger.Warn("QUIC connection failed, falling back to HTTP/2: ", err)
+		return i.serveHTTP2(connIndex, edgeAddr, features, numPreviousAttempts)
 	case "http2":
 		return i.serveHTTP2(connIndex, edgeAddr, features, numPreviousAttempts)
 	default:

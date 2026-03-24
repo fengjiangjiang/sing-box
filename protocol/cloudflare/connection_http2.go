@@ -67,9 +67,8 @@ func NewHTTP2Connection(
 	}
 
 	tlsConfig := &tls.Config{
-		RootCAs:          rootCAs,
-		ServerName:       h2EdgeSNI,
-		CurvePreferences: []tls.CurveID{tls.CurveP256},
+		RootCAs:    rootCAs,
+		ServerName: h2EdgeSNI,
 	}
 
 	dialer := &net.Dialer{}
