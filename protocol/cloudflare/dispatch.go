@@ -156,6 +156,7 @@ func (i *Inbound) resolveHTTPService(requestURL string) (ResolvedService, string
 			return ResolvedService{}, "", err
 		}
 		service.BaseURL = helloURL
+		service.OriginRequest.NoTLSVerify = true
 	}
 	originURL, err := service.BuildRequestURL(requestURL)
 	if err != nil {

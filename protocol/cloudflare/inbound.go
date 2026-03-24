@@ -4,6 +4,7 @@ package cloudflare
 
 import (
 	"context"
+	stdTLS "crypto/tls"
 	"encoding/base64"
 	"io"
 	"math/rand"
@@ -17,6 +18,7 @@ import (
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/inbound"
 	boxDialer "github.com/sagernet/sing-box/common/dialer"
+	boxTLS "github.com/sagernet/sing-box/common/tls"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
@@ -227,12 +229,20 @@ func (i *Inbound) ensureHelloWorldURL() (*url.URL, error) {
 	if err != nil {
 		return nil, E.Cause(err, "listen hello world server")
 	}
+	certificate, err := boxTLS.GenerateKeyPair(nil, nil, time.Now, "localhost")
+	if err != nil {
+		_ = listener.Close()
+		return nil, E.Cause(err, "generate hello world certificate")
+	}
+	tlsListener := stdTLS.NewListener(listener, &stdTLS.Config{
+		Certificates: []stdTLS.Certificate{*certificate},
+	})
 	server := &http.Server{Handler: mux}
-	go server.Serve(listener)
+	go server.Serve(tlsListener)
 
 	i.helloWorldServer = server
 	i.helloWorldURL = &url.URL{
-		Scheme: "http",
+		Scheme: "https",
 		Host:   listener.Addr().String(),
 	}
 	return i.helloWorldURL, nil

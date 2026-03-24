@@ -151,3 +151,29 @@ func TestResolveHTTPServiceStatus(t *testing.T) {
 		t.Fatalf("status service should keep request URL, got %s", requestURL)
 	}
 }
+
+func TestResolveHTTPServiceHelloWorld(t *testing.T) {
+	inboundInstance := newTestIngressInbound(t)
+	inboundInstance.configManager.activeConfig = RuntimeConfig{
+		Ingress: []compiledIngressRule{
+			{Service: mustResolvedService(t, "hello_world")},
+		},
+	}
+
+	service, requestURL, err := inboundInstance.resolveHTTPService("https://hello.example.com/path")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if service.Kind != ResolvedServiceHelloWorld {
+		t.Fatalf("expected hello world service, got %#v", service)
+	}
+	if service.BaseURL == nil || service.BaseURL.Scheme != "https" {
+		t.Fatalf("expected hello world base URL to be https, got %#v", service.BaseURL)
+	}
+	if !service.OriginRequest.NoTLSVerify {
+		t.Fatal("expected hello world to force no_tls_verify")
+	}
+	if requestURL == "" || requestURL[:8] != "https://" {
+		t.Fatalf("expected https request URL, got %s", requestURL)
+	}
+}
