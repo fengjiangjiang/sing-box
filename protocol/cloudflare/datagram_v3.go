@@ -142,6 +142,10 @@ func (m *DatagramV3Muxer) handleRegistration(ctx context.Context, data []byte) {
 	if closeAfterIdle == 0 {
 		closeAfterIdle = 210 * time.Second
 	}
+	if !destination.Addr().IsValid() || destination.Addr().IsUnspecified() || destination.Port() == 0 {
+		m.sendRegistrationResponse(requestID, v3ResponseDestinationUnreachable, "")
+		return
+	}
 
 	m.sessionAccess.Lock()
 	if existing, exists := m.sessions[requestID]; exists {
