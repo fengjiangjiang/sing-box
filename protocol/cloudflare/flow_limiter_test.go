@@ -31,11 +31,12 @@ func newLimitedInbound(t *testing.T, limit uint64) *Inbound {
 	config.WarpRouting.MaxActiveFlows = limit
 	configManager.activeConfig = config
 	return &Inbound{
-		Adapter:       inbound.NewAdapter(C.TypeCloudflared, "test"),
-		router:        &testRouter{},
-		logger:        logFactory.NewLogger("test"),
-		configManager: configManager,
-		flowLimiter:   &FlowLimiter{},
+		Adapter:           inbound.NewAdapter(C.TypeCloudflared, "test"),
+		router:            &testRouter{},
+		logger:            logFactory.NewLogger("test"),
+		configManager:     configManager,
+		flowLimiter:       &FlowLimiter{},
+		datagramV3Manager: NewDatagramV3SessionManager(),
 	}
 }
 

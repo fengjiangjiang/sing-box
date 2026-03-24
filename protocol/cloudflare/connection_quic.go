@@ -271,6 +271,19 @@ func (q *QUICConnection) SendDatagram(data []byte) error {
 	return q.conn.SendDatagram(data)
 }
 
+func (q *QUICConnection) OpenRPCStream(ctx context.Context) (io.ReadWriteCloser, error) {
+	stream, err := q.conn.OpenStream()
+	if err != nil {
+		return nil, E.Cause(err, "open rpc stream")
+	}
+	rwc := newStreamReadWriteCloser(stream)
+	if err := WriteRPCStreamSignature(rwc); err != nil {
+		rwc.Close()
+		return nil, E.Cause(err, "write rpc stream signature")
+	}
+	return rwc, nil
+}
+
 func (q *QUICConnection) gracefulShutdown() {
 	q.closeOnce.Do(func() {
 		if q.registrationClient != nil {

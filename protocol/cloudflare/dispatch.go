@@ -19,6 +19,7 @@ import (
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing/common"
+	"github.com/sagernet/sing/common/bufio"
 	E "github.com/sagernet/sing/common/exceptions"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
@@ -195,17 +196,24 @@ func (i *Inbound) handleTCPStream(ctx context.Context, stream io.ReadWriteCloser
 	}
 	defer i.flowLimiter.Release(limit)
 
-	err := respWriter.WriteResponse(nil, nil)
+	targetConn, err := i.dialWarpTCP(ctx, metadata.Destination)
+	if err != nil {
+		i.logger.ErrorContext(ctx, "dial tcp origin: ", err)
+		respWriter.WriteResponse(err, nil)
+		return
+	}
+	defer targetConn.Close()
+
+	err = respWriter.WriteResponse(nil, nil)
 	if err != nil {
 		i.logger.ErrorContext(ctx, "write connect response: ", err)
 		return
 	}
 
-	done := make(chan struct{})
-	i.router.RouteConnectionEx(ctx, newStreamConn(stream), metadata, N.OnceClose(func(it error) {
-		close(done)
-	}))
-	<-done
+	err = bufio.CopyConn(ctx, newStreamConn(stream), targetConn)
+	if err != nil && !E.IsClosedOrCanceled(err) {
+		i.logger.DebugContext(ctx, "copy TCP stream: ", err)
+	}
 }
 
 func (i *Inbound) handleHTTPService(ctx context.Context, stream io.ReadWriteCloser, respWriter ConnectResponseWriter, request *ConnectRequest, metadata adapter.InboundContext, service ResolvedService) {

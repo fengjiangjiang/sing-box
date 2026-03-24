@@ -166,6 +166,8 @@ func BuildConnectionOptions(connectorID uuid.UUID, features []string, numPreviou
 			Version:  clientVersion,
 			Arch:     runtime.GOOS + "_" + runtime.GOARCH,
 		},
+		ReplaceExisting:     false,
+		CompressionQuality:  0,
 		OriginLocalIP:       originLocalIP,
 		NumPreviousAttempts: numPreviousAttempts,
 	}

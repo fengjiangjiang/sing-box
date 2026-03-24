@@ -22,6 +22,7 @@ import (
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing-tun"
+	"github.com/sagernet/sing/common/bufio"
 	N "github.com/sagernet/sing/common/network"
 
 	"github.com/google/uuid"
@@ -137,6 +138,18 @@ func (r *testRouter) RoutePacketConnectionEx(ctx context.Context, conn N.PacketC
 	onClose(nil)
 }
 
+func (r *testRouter) DialRouteConnection(ctx context.Context, metadata adapter.InboundContext) (net.Conn, error) {
+	return net.Dial("tcp", metadata.Destination.String())
+}
+
+func (r *testRouter) DialRoutePacketConnection(ctx context.Context, metadata adapter.InboundContext) (N.PacketConn, error) {
+	conn, err := net.Dial("udp", metadata.Destination.String())
+	if err != nil {
+		return nil, err
+	}
+	return bufio.NewUnbindPacketConn(conn), nil
+}
+
 func (r *testRouter) PreMatch(metadata adapter.InboundContext, routeContext tun.DirectRouteContext, timeout time.Duration, supportBypass bool) (tun.DirectRouteDestination, error) {
 	if r.preMatch != nil {
 		return r.preMatch(metadata, routeContext, timeout, supportBypass)
@@ -177,23 +190,24 @@ func newTestInbound(t *testing.T, token string, protocol string, haConnections i
 
 	ctx, cancel := context.WithCancel(context.Background())
 	inboundInstance := &Inbound{
-		Adapter:          inbound.NewAdapter(C.TypeCloudflared, "test"),
-		ctx:              ctx,
-		cancel:           cancel,
-		router:           &testRouter{},
-		logger:           logFactory.NewLogger("test"),
-		credentials:      credentials,
-		connectorID:      uuid.New(),
-		haConnections:    haConnections,
-		protocol:         protocol,
-		edgeIPVersion:    0,
-		datagramVersion:  "",
-		gracePeriod:      5 * time.Second,
-		configManager:    configManager,
-		datagramV2Muxers: make(map[DatagramSender]*DatagramV2Muxer),
-		datagramV3Muxers: make(map[DatagramSender]*DatagramV3Muxer),
-		controlDialer:    N.SystemDialer,
-		accessCache:      &accessValidatorCache{values: make(map[string]accessValidator), dialer: N.SystemDialer},
+		Adapter:           inbound.NewAdapter(C.TypeCloudflared, "test"),
+		ctx:               ctx,
+		cancel:            cancel,
+		router:            &testRouter{},
+		logger:            logFactory.NewLogger("test"),
+		credentials:       credentials,
+		connectorID:       uuid.New(),
+		haConnections:     haConnections,
+		protocol:          protocol,
+		edgeIPVersion:     0,
+		datagramVersion:   "",
+		gracePeriod:       5 * time.Second,
+		configManager:     configManager,
+		datagramV2Muxers:  make(map[DatagramSender]*DatagramV2Muxer),
+		datagramV3Muxers:  make(map[DatagramSender]*DatagramV3Muxer),
+		datagramV3Manager: NewDatagramV3SessionManager(),
+		controlDialer:     N.SystemDialer,
+		accessCache:       &accessValidatorCache{values: make(map[string]accessValidator), dialer: N.SystemDialer},
 	}
 
 	t.Cleanup(func() {

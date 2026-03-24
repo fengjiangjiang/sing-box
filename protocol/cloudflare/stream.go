@@ -168,6 +168,11 @@ func WriteConnectResponse(w io.Writer, responseError error, metadata ...Metadata
 	return capnp.NewEncoder(w).Encode(msg)
 }
 
+func WriteRPCStreamSignature(w io.Writer) error {
+	_, err := w.Write(rpcStreamSignature[:])
+	return err
+}
+
 // Registration data structures for the control stream.
 
 type RegistrationTunnelAuth struct {

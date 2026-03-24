@@ -5,13 +5,11 @@ package cloudflare
 import (
 	"context"
 	"encoding/binary"
-	"io"
-	"net"
+	"errors"
 	"net/netip"
 	"sync"
 	"time"
 
-	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing/common/buf"
 	M "github.com/sagernet/sing/common/metadata"
@@ -56,25 +54,40 @@ const (
 // RequestID is a 128-bit session identifier for V3.
 type RequestID [v3RequestIDLength]byte
 
+type v3RegistrationState uint8
+
+const (
+	v3RegistrationNew v3RegistrationState = iota
+	v3RegistrationExisting
+	v3RegistrationMigrated
+)
+
+type DatagramV3SessionManager struct {
+	sessionAccess sync.RWMutex
+	sessions      map[RequestID]*v3Session
+}
+
+func NewDatagramV3SessionManager() *DatagramV3SessionManager {
+	return &DatagramV3SessionManager{
+		sessions: make(map[RequestID]*v3Session),
+	}
+}
+
 // DatagramV3Muxer handles V3 datagram demuxing and session management.
 type DatagramV3Muxer struct {
 	inbound *Inbound
 	logger  log.ContextLogger
 	sender  DatagramSender
 	icmp    *ICMPBridge
-
-	sessionAccess sync.RWMutex
-	sessions      map[RequestID]*v3Session
 }
 
 // NewDatagramV3Muxer creates a new V3 datagram muxer.
 func NewDatagramV3Muxer(inbound *Inbound, sender DatagramSender, logger log.ContextLogger) *DatagramV3Muxer {
 	return &DatagramV3Muxer{
-		inbound:  inbound,
-		logger:   logger,
-		sender:   sender,
-		icmp:     NewICMPBridge(inbound, sender, icmpWireV3),
-		sessions: make(map[RequestID]*v3Session),
+		inbound: inbound,
+		logger:  logger,
+		sender:  sender,
+		icmp:    NewICMPBridge(inbound, sender, icmpWireV3),
 	}
 }
 
@@ -147,37 +160,25 @@ func (m *DatagramV3Muxer) handleRegistration(ctx context.Context, data []byte) {
 		return
 	}
 
-	m.sessionAccess.Lock()
-	if existing, exists := m.sessions[requestID]; exists {
-		m.sessionAccess.Unlock()
-		// Session already exists - re-ack
-		m.sendRegistrationResponse(requestID, v3ResponseOK, "")
-		// Handle bundled payload
-		if flags&v3FlagBundle != 0 && len(data) > offset {
-			existing.writeToOrigin(data[offset:])
-		}
-		return
-	}
-	limit := m.inbound.maxActiveFlows()
-	if !m.inbound.flowLimiter.Acquire(limit) {
-		m.sessionAccess.Unlock()
+	session, state, err := m.inbound.datagramV3Manager.Register(m.inbound, ctx, requestID, destination, closeAfterIdle, m.sender)
+	if err == errTooManyActiveFlows {
 		m.sendRegistrationResponse(requestID, v3ResponseTooManyActiveFlows, "")
 		return
 	}
+	if err != nil {
+		m.sendRegistrationResponse(requestID, v3ResponseUnableToBindSocket, "")
+		return
+	}
 
-	session := newV3Session(requestID, destination, closeAfterIdle, m)
-	m.sessions[requestID] = session
-	m.sessionAccess.Unlock()
-
-	m.logger.Info("registered V3 UDP session to ", destination)
+	if state == v3RegistrationNew {
+		m.logger.Info("registered V3 UDP session to ", destination)
+	}
 	m.sendRegistrationResponse(requestID, v3ResponseOK, "")
 
 	// Handle bundled first payload
 	if flags&v3FlagBundle != 0 && len(data) > offset {
 		session.writeToOrigin(data[offset:])
 	}
-
-	go m.serveV3Session(ctx, session, limit)
 }
 
 func (m *DatagramV3Muxer) handlePayload(data []byte) {
@@ -189,10 +190,7 @@ func (m *DatagramV3Muxer) handlePayload(data []byte) {
 	copy(requestID[:], data[:v3RequestIDLength])
 	payload := data[v3RequestIDLength:]
 
-	m.sessionAccess.RLock()
-	session, exists := m.sessions[requestID]
-	m.sessionAccess.RUnlock()
-
+	session, exists := m.inbound.datagramV3Manager.Get(requestID)
 	if !exists {
 		return
 	}
@@ -219,74 +217,162 @@ func (m *DatagramV3Muxer) sendPayload(requestID RequestID, payload []byte) {
 	m.sender.SendDatagram(data)
 }
 
-func (m *DatagramV3Muxer) unregisterSession(requestID RequestID) {
-	m.sessionAccess.Lock()
-	session, exists := m.sessions[requestID]
-	if exists {
-		delete(m.sessions, requestID)
-	}
-	m.sessionAccess.Unlock()
-
-	if exists {
-		session.close()
-	}
-}
-
-func (m *DatagramV3Muxer) serveV3Session(ctx context.Context, session *v3Session, limit uint64) {
-	defer m.unregisterSession(session.id)
-	defer m.inbound.flowLimiter.Release(limit)
-
-	metadata := adapter.InboundContext{
-		Inbound:     m.inbound.Tag(),
-		InboundType: m.inbound.Type(),
-		Network:     N.NetworkUDP,
-	}
-	metadata.Destination = M.SocksaddrFromNetIP(session.destination)
-
-	done := make(chan struct{})
-	m.inbound.router.RoutePacketConnectionEx(
-		ctx,
-		session,
-		metadata,
-		N.OnceClose(func(it error) {
-			close(done)
-		}),
-	)
-	<-done
-}
-
 // Close closes all V3 sessions.
-func (m *DatagramV3Muxer) Close() {
-	m.sessionAccess.Lock()
-	sessions := m.sessions
-	m.sessions = make(map[RequestID]*v3Session)
-	m.sessionAccess.Unlock()
-
-	for _, session := range sessions {
-		session.close()
-	}
-}
+func (m *DatagramV3Muxer) Close() {}
 
 // v3Session represents a V3 UDP session.
 type v3Session struct {
 	id             RequestID
 	destination    netip.AddrPort
 	closeAfterIdle time.Duration
-	muxer          *DatagramV3Muxer
+	origin         N.PacketConn
+	manager        *DatagramV3SessionManager
+	inbound        *Inbound
 
 	writeChan chan []byte
 	closeOnce sync.Once
 	closeChan chan struct{}
+
+	activeAccess sync.RWMutex
+	activeAt     time.Time
+
+	senderAccess sync.RWMutex
+	sender       DatagramSender
 }
 
-func newV3Session(id RequestID, destination netip.AddrPort, closeAfterIdle time.Duration, muxer *DatagramV3Muxer) *v3Session {
-	return &v3Session{
-		id:             id,
+var errTooManyActiveFlows = errors.New("too many active flows")
+
+func (m *DatagramV3SessionManager) Register(
+	inbound *Inbound,
+	ctx context.Context,
+	requestID RequestID,
+	destination netip.AddrPort,
+	closeAfterIdle time.Duration,
+	sender DatagramSender,
+) (*v3Session, v3RegistrationState, error) {
+	m.sessionAccess.Lock()
+	if existing, exists := m.sessions[requestID]; exists {
+		if existing.sender == sender {
+			existing.markActive()
+			m.sessionAccess.Unlock()
+			return existing, v3RegistrationExisting, nil
+		}
+		existing.setSender(sender)
+		existing.markActive()
+		m.sessionAccess.Unlock()
+		return existing, v3RegistrationMigrated, nil
+	}
+
+	limit := inbound.maxActiveFlows()
+	if !inbound.flowLimiter.Acquire(limit) {
+		m.sessionAccess.Unlock()
+		return nil, 0, errTooManyActiveFlows
+	}
+	origin, err := inbound.dialWarpPacketConnection(ctx, destination)
+	if err != nil {
+		inbound.flowLimiter.Release(limit)
+		m.sessionAccess.Unlock()
+		return nil, 0, err
+	}
+
+	session := &v3Session{
+		id:             requestID,
 		destination:    destination,
 		closeAfterIdle: closeAfterIdle,
-		muxer:          muxer,
+		origin:         origin,
+		manager:        m,
+		inbound:        inbound,
 		writeChan:      make(chan []byte, 512),
 		closeChan:      make(chan struct{}),
+		activeAt:       time.Now(),
+		sender:         sender,
+	}
+	m.sessions[requestID] = session
+	m.sessionAccess.Unlock()
+
+	sessionCtx := inbound.ctx
+	if sessionCtx == nil {
+		sessionCtx = context.Background()
+	}
+	go session.serve(sessionCtx, limit)
+	return session, v3RegistrationNew, nil
+}
+
+func (m *DatagramV3SessionManager) Get(requestID RequestID) (*v3Session, bool) {
+	m.sessionAccess.RLock()
+	defer m.sessionAccess.RUnlock()
+	session, exists := m.sessions[requestID]
+	return session, exists
+}
+
+func (m *DatagramV3SessionManager) remove(session *v3Session) {
+	m.sessionAccess.Lock()
+	if current, exists := m.sessions[session.id]; exists && current == session {
+		delete(m.sessions, session.id)
+	}
+	m.sessionAccess.Unlock()
+}
+
+func (s *v3Session) serve(ctx context.Context, limit uint64) {
+	defer s.inbound.flowLimiter.Release(limit)
+	defer s.manager.remove(s)
+
+	go s.readLoop()
+	go s.writeLoop()
+
+	tickInterval := s.closeAfterIdle / 2
+	if tickInterval <= 0 || tickInterval > 10*time.Second {
+		tickInterval = time.Second
+	}
+	ticker := time.NewTicker(tickInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			s.close()
+		case <-ticker.C:
+			if time.Since(s.lastActive()) >= s.closeAfterIdle {
+				s.close()
+			}
+		case <-s.closeChan:
+			return
+		}
+	}
+}
+
+func (s *v3Session) readLoop() {
+	for {
+		buffer := buf.NewPacket()
+		_, err := s.origin.ReadPacket(buffer)
+		if err != nil {
+			buffer.Release()
+			s.close()
+			return
+		}
+		s.markActive()
+		if err := s.senderDatagram(append([]byte(nil), buffer.Bytes()...)); err != nil {
+			buffer.Release()
+			s.close()
+			return
+		}
+		buffer.Release()
+	}
+}
+
+func (s *v3Session) writeLoop() {
+	for {
+		select {
+		case payload := <-s.writeChan:
+			err := s.origin.WritePacket(buf.As(payload), M.SocksaddrFromNetIP(s.destination))
+			if err != nil {
+				s.close()
+				return
+			}
+			s.markActive()
+		case <-s.closeChan:
+			return
+		}
 	}
 }
 
@@ -299,35 +385,41 @@ func (s *v3Session) writeToOrigin(payload []byte) {
 	}
 }
 
+func (s *v3Session) senderDatagram(payload []byte) error {
+	data := make([]byte, v3PayloadHeaderLen+len(payload))
+	data[0] = byte(DatagramV3TypePayload)
+	copy(data[1:1+v3RequestIDLength], s.id[:])
+	copy(data[v3PayloadHeaderLen:], payload)
+
+	s.senderAccess.RLock()
+	sender := s.sender
+	s.senderAccess.RUnlock()
+	return sender.SendDatagram(data)
+}
+
+func (s *v3Session) setSender(sender DatagramSender) {
+	s.senderAccess.Lock()
+	s.sender = sender
+	s.senderAccess.Unlock()
+}
+
+func (s *v3Session) markActive() {
+	s.activeAccess.Lock()
+	s.activeAt = time.Now()
+	s.activeAccess.Unlock()
+}
+
+func (s *v3Session) lastActive() time.Time {
+	s.activeAccess.RLock()
+	defer s.activeAccess.RUnlock()
+	return s.activeAt
+}
+
 func (s *v3Session) close() {
 	s.closeOnce.Do(func() {
+		if s.origin != nil {
+			_ = s.origin.Close()
+		}
 		close(s.closeChan)
 	})
 }
-
-// ReadPacket implements N.PacketConn.
-func (s *v3Session) ReadPacket(buffer *buf.Buffer) (M.Socksaddr, error) {
-	select {
-	case data := <-s.writeChan:
-		_, err := buffer.Write(data)
-		return M.SocksaddrFromNetIP(s.destination), err
-	case <-s.closeChan:
-		return M.Socksaddr{}, io.EOF
-	}
-}
-
-// WritePacket implements N.PacketConn.
-func (s *v3Session) WritePacket(buffer *buf.Buffer, destination M.Socksaddr) error {
-	s.muxer.sendPayload(s.id, buffer.Bytes())
-	return nil
-}
-
-func (s *v3Session) Close() error {
-	s.close()
-	return nil
-}
-
-func (s *v3Session) LocalAddr() net.Addr                { return nil }
-func (s *v3Session) SetDeadline(_ time.Time) error      { return nil }
-func (s *v3Session) SetReadDeadline(_ time.Time) error  { return nil }
-func (s *v3Session) SetWriteDeadline(_ time.Time) error { return nil }

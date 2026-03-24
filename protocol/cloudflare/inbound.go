@@ -61,6 +61,7 @@ type Inbound struct {
 	datagramMuxerAccess sync.Mutex
 	datagramV2Muxers    map[DatagramSender]*DatagramV2Muxer
 	datagramV3Muxers    map[DatagramSender]*DatagramV3Muxer
+	datagramV3Manager   *DatagramV3SessionManager
 
 	helloWorldAccess sync.Mutex
 	helloWorldServer *http.Server
@@ -129,27 +130,28 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 	inboundCtx, cancel := context.WithCancel(ctx)
 
 	return &Inbound{
-		Adapter:          inbound.NewAdapter(C.TypeCloudflared, tag),
-		ctx:              inboundCtx,
-		cancel:           cancel,
-		router:           router,
-		logger:           logger,
-		credentials:      credentials,
-		connectorID:      uuid.New(),
-		haConnections:    haConnections,
-		protocol:         protocol,
-		region:           region,
-		edgeIPVersion:    edgeIPVersion,
-		datagramVersion:  datagramVersion,
-		gracePeriod:      gracePeriod,
-		configManager:    configManager,
-		flowLimiter:      &FlowLimiter{},
-		accessCache:      &accessValidatorCache{values: make(map[string]accessValidator), dialer: controlDialer},
-		controlDialer:    controlDialer,
-		datagramV2Muxers: make(map[DatagramSender]*DatagramV2Muxer),
-		datagramV3Muxers: make(map[DatagramSender]*DatagramV3Muxer),
-		connectedIndices: make(map[uint8]struct{}),
-		connectedNotify:  make(chan uint8, haConnections),
+		Adapter:           inbound.NewAdapter(C.TypeCloudflared, tag),
+		ctx:               inboundCtx,
+		cancel:            cancel,
+		router:            router,
+		logger:            logger,
+		credentials:       credentials,
+		connectorID:       uuid.New(),
+		haConnections:     haConnections,
+		protocol:          protocol,
+		region:            region,
+		edgeIPVersion:     edgeIPVersion,
+		datagramVersion:   datagramVersion,
+		gracePeriod:       gracePeriod,
+		configManager:     configManager,
+		flowLimiter:       &FlowLimiter{},
+		accessCache:       &accessValidatorCache{values: make(map[string]accessValidator), dialer: controlDialer},
+		controlDialer:     controlDialer,
+		datagramV2Muxers:  make(map[DatagramSender]*DatagramV2Muxer),
+		datagramV3Muxers:  make(map[DatagramSender]*DatagramV3Muxer),
+		datagramV3Manager: NewDatagramV3SessionManager(),
+		connectedIndices:  make(map[uint8]struct{}),
+		connectedNotify:   make(chan uint8, haConnections),
 	}, nil
 }
 
@@ -170,6 +172,7 @@ func (i *Inbound) Start(stage adapter.StartStage) error {
 		return E.New("no edge addresses available")
 	}
 
+	i.datagramVersion = resolveDatagramVersion(i.ctx, i.credentials.AccountTag, i.datagramVersion)
 	features := DefaultFeatures(i.datagramVersion)
 
 	for connIndex := 0; connIndex < i.haConnections; connIndex++ {
@@ -301,6 +304,10 @@ func (i *Inbound) superviseConnection(connIndex uint8, edgeAddrs []*EdgeAddr, fe
 
 		retries++
 		backoff := backoffDuration(retries)
+		var retryableErr *RetryableError
+		if errors.As(err, &retryableErr) && retryableErr.Delay > 0 {
+			backoff = retryableErr.Delay
+		}
 		i.logger.Error("connection ", connIndex, " failed: ", err, ", retrying in ", backoff)
 
 		select {

@@ -14,8 +14,9 @@ import (
 func TestDatagramV3RegistrationDestinationUnreachable(t *testing.T) {
 	sender := &captureDatagramSender{}
 	inboundInstance := &Inbound{
-		Adapter:     inbound.NewAdapter(C.TypeCloudflared, "test"),
-		flowLimiter: &FlowLimiter{},
+		Adapter:           inbound.NewAdapter(C.TypeCloudflared, "test"),
+		flowLimiter:       &FlowLimiter{},
+		datagramV3Manager: NewDatagramV3SessionManager(),
 	}
 	muxer := NewDatagramV3Muxer(inboundInstance, sender, nil)
 
@@ -40,8 +41,9 @@ func TestDatagramV3RegistrationDestinationUnreachable(t *testing.T) {
 func TestDatagramV3RegistrationErrorWithMessage(t *testing.T) {
 	sender := &captureDatagramSender{}
 	inboundInstance := &Inbound{
-		Adapter:     inbound.NewAdapter(C.TypeCloudflared, "test"),
-		flowLimiter: &FlowLimiter{},
+		Adapter:           inbound.NewAdapter(C.TypeCloudflared, "test"),
+		flowLimiter:       &FlowLimiter{},
+		datagramV3Manager: NewDatagramV3SessionManager(),
 	}
 	muxer := NewDatagramV3Muxer(inboundInstance, sender, nil)
 

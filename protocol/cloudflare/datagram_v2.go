@@ -10,7 +10,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/protocol/cloudflare/tunnelrpc"
 	"github.com/sagernet/sing/common/buf"
@@ -57,6 +56,54 @@ func NewDatagramV2Muxer(inbound *Inbound, sender DatagramSender, logger log.Cont
 		icmp:     NewICMPBridge(inbound, sender, icmpWireV2),
 		sessions: make(map[uuid.UUID]*udpSession),
 	}
+}
+
+type rpcStreamOpener interface {
+	OpenRPCStream(ctx context.Context) (io.ReadWriteCloser, error)
+}
+
+type v2SessionRPCClient interface {
+	UnregisterSession(ctx context.Context, sessionID uuid.UUID, message string) error
+	Close() error
+}
+
+var newV2SessionRPCClient = func(ctx context.Context, sender DatagramSender) (v2SessionRPCClient, error) {
+	opener, ok := sender.(rpcStreamOpener)
+	if !ok {
+		return nil, E.New("sender does not support rpc streams")
+	}
+	stream, err := opener.OpenRPCStream(ctx)
+	if err != nil {
+		return nil, err
+	}
+	transport := rpc.StreamTransport(stream)
+	conn := rpc.NewConn(transport)
+	return &capnpV2SessionRPCClient{
+		client:    tunnelrpc.SessionManager{Client: conn.Bootstrap(ctx)},
+		rpcConn:   conn,
+		transport: transport,
+	}, nil
+}
+
+type capnpV2SessionRPCClient struct {
+	client    tunnelrpc.SessionManager
+	rpcConn   *rpc.Conn
+	transport rpc.Transport
+}
+
+func (c *capnpV2SessionRPCClient) UnregisterSession(ctx context.Context, sessionID uuid.UUID, message string) error {
+	promise := c.client.UnregisterUdpSession(ctx, func(p tunnelrpc.SessionManager_unregisterUdpSession_Params) error {
+		if err := p.SetSessionId(sessionID[:]); err != nil {
+			return err
+		}
+		return p.SetMessage(message)
+	})
+	_, err := promise.Struct()
+	return err
+}
+
+func (c *capnpV2SessionRPCClient) Close() error {
+	return E.Errors(c.rpcConn.Close(), c.transport.Close())
 }
 
 // HandleDatagram demuxes an incoming V2 datagram.
@@ -139,7 +186,14 @@ func (m *DatagramV2Muxer) RegisterSession(
 		return E.New("too many active flows")
 	}
 
-	session := newUDPSession(sessionID, destination, closeAfterIdle, m)
+	origin, err := m.inbound.dialWarpPacketConnection(ctx, destination)
+	if err != nil {
+		m.inbound.flowLimiter.Release(limit)
+		m.sessionAccess.Unlock()
+		return err
+	}
+
+	session := newUDPSession(sessionID, destination, closeAfterIdle, origin, m)
 	m.sessions[sessionID] = session
 	m.sessionAccess.Unlock()
 
@@ -159,32 +213,30 @@ func (m *DatagramV2Muxer) UnregisterSession(sessionID uuid.UUID) {
 	m.sessionAccess.Unlock()
 
 	if exists {
+		session.markRemoteClosed()
 		session.close()
 		m.logger.Info("unregistered V2 UDP session ", sessionID)
 	}
 }
 
 func (m *DatagramV2Muxer) serveSession(ctx context.Context, session *udpSession, limit uint64) {
-	defer m.UnregisterSession(session.id)
 	defer m.inbound.flowLimiter.Release(limit)
 
-	metadata := adapter.InboundContext{
-		Inbound:     m.inbound.Tag(),
-		InboundType: m.inbound.Type(),
-		Network:     N.NetworkUDP,
-	}
-	metadata.Destination = M.SocksaddrFromNetIP(session.destination)
+	session.serve(ctx)
 
-	done := make(chan struct{})
-	m.inbound.router.RoutePacketConnectionEx(
-		ctx,
-		session,
-		metadata,
-		N.OnceClose(func(it error) {
-			close(done)
-		}),
-	)
-	<-done
+	m.sessionAccess.Lock()
+	if current, exists := m.sessions[session.id]; exists && current == session {
+		delete(m.sessions, session.id)
+	}
+	m.sessionAccess.Unlock()
+
+	if !session.remoteClosed() {
+		unregisterCtx, cancel := context.WithTimeout(context.Background(), registrationTimeout)
+		defer cancel()
+		if err := m.unregisterRemoteSession(unregisterCtx, session.id, session.closeReason()); err != nil {
+			m.logger.Debug("failed to unregister V2 UDP session ", session.id, ": ", err)
+		}
+	}
 }
 
 // sendToEdge sends a V2 UDP datagram back to the edge.
@@ -213,21 +265,31 @@ type udpSession struct {
 	id             uuid.UUID
 	destination    netip.AddrPort
 	closeAfterIdle time.Duration
+	origin         N.PacketConn
 	muxer          *DatagramV2Muxer
 
 	writeChan chan []byte
 	closeOnce sync.Once
 	closeChan chan struct{}
+
+	activeAccess sync.RWMutex
+	activeAt     time.Time
+
+	stateAccess       sync.RWMutex
+	closedByRemote    bool
+	closeReasonString string
 }
 
-func newUDPSession(id uuid.UUID, destination netip.AddrPort, closeAfterIdle time.Duration, muxer *DatagramV2Muxer) *udpSession {
+func newUDPSession(id uuid.UUID, destination netip.AddrPort, closeAfterIdle time.Duration, origin N.PacketConn, muxer *DatagramV2Muxer) *udpSession {
 	return &udpSession{
 		id:             id,
 		destination:    destination,
 		closeAfterIdle: closeAfterIdle,
+		origin:         origin,
 		muxer:          muxer,
 		writeChan:      make(chan []byte, 256),
 		closeChan:      make(chan struct{}),
+		activeAt:       time.Now(),
 	}
 }
 
@@ -242,8 +304,112 @@ func (s *udpSession) writeToOrigin(payload []byte) {
 
 func (s *udpSession) close() {
 	s.closeOnce.Do(func() {
+		if s.origin != nil {
+			_ = s.origin.Close()
+		}
 		close(s.closeChan)
 	})
+}
+
+func (s *udpSession) serve(ctx context.Context) {
+	go s.readLoop()
+	go s.writeLoop()
+
+	tickInterval := s.closeAfterIdle / 2
+	if tickInterval <= 0 || tickInterval > 10*time.Second {
+		tickInterval = time.Second
+	}
+	ticker := time.NewTicker(tickInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			s.closeWithReason("connection closed")
+		case <-ticker.C:
+			if time.Since(s.lastActive()) >= s.closeAfterIdle {
+				s.closeWithReason("idle timeout")
+			}
+		case <-s.closeChan:
+			return
+		}
+	}
+}
+
+func (s *udpSession) readLoop() {
+	for {
+		buffer := buf.NewPacket()
+		_, err := s.origin.ReadPacket(buffer)
+		if err != nil {
+			buffer.Release()
+			s.closeWithReason(err.Error())
+			return
+		}
+		s.markActive()
+		s.muxer.sendToEdge(s.id, append([]byte(nil), buffer.Bytes()...))
+		buffer.Release()
+	}
+}
+
+func (s *udpSession) writeLoop() {
+	for {
+		select {
+		case payload := <-s.writeChan:
+			err := s.origin.WritePacket(buf.As(payload), M.SocksaddrFromNetIP(s.destination))
+			if err != nil {
+				s.closeWithReason(err.Error())
+				return
+			}
+			s.markActive()
+		case <-s.closeChan:
+			return
+		}
+	}
+}
+
+func (s *udpSession) markActive() {
+	s.activeAccess.Lock()
+	s.activeAt = time.Now()
+	s.activeAccess.Unlock()
+}
+
+func (s *udpSession) lastActive() time.Time {
+	s.activeAccess.RLock()
+	defer s.activeAccess.RUnlock()
+	return s.activeAt
+}
+
+func (s *udpSession) closeWithReason(reason string) {
+	s.stateAccess.Lock()
+	if s.closeReasonString == "" {
+		s.closeReasonString = reason
+	}
+	s.stateAccess.Unlock()
+	s.close()
+}
+
+func (s *udpSession) markRemoteClosed() {
+	s.stateAccess.Lock()
+	s.closedByRemote = true
+	if s.closeReasonString == "" {
+		s.closeReasonString = "unregistered by edge"
+	}
+	s.stateAccess.Unlock()
+}
+
+func (s *udpSession) remoteClosed() bool {
+	s.stateAccess.RLock()
+	defer s.stateAccess.RUnlock()
+	return s.closedByRemote
+}
+
+func (s *udpSession) closeReason() string {
+	s.stateAccess.RLock()
+	defer s.stateAccess.RUnlock()
+	if s.closeReasonString == "" {
+		return "session closed"
+	}
+	return s.closeReasonString
 }
 
 // ReadPacket implements N.PacketConn - reads packets from the edge to forward to origin.
@@ -272,6 +438,15 @@ func (s *udpSession) LocalAddr() net.Addr                { return nil }
 func (s *udpSession) SetDeadline(_ time.Time) error      { return nil }
 func (s *udpSession) SetReadDeadline(_ time.Time) error  { return nil }
 func (s *udpSession) SetWriteDeadline(_ time.Time) error { return nil }
+
+func (m *DatagramV2Muxer) unregisterRemoteSession(ctx context.Context, sessionID uuid.UUID, message string) error {
+	client, err := newV2SessionRPCClient(ctx, m.sender)
+	if err != nil {
+		return err
+	}
+	defer client.Close()
+	return client.UnregisterSession(ctx, sessionID, message)
+}
 
 // V2 RPC server implementation for HandleRPCStream.
 
