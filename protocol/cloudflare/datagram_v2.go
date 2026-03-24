@@ -133,6 +133,11 @@ func (m *DatagramV2Muxer) RegisterSession(
 		m.sessionAccess.Unlock()
 		return nil
 	}
+	limit := m.inbound.maxActiveFlows()
+	if !m.inbound.flowLimiter.Acquire(limit) {
+		m.sessionAccess.Unlock()
+		return E.New("too many active flows")
+	}
 
 	session := newUDPSession(sessionID, destination, closeAfterIdle, m)
 	m.sessions[sessionID] = session
@@ -140,7 +145,7 @@ func (m *DatagramV2Muxer) RegisterSession(
 
 	m.logger.Info("registered V2 UDP session ", sessionID, " to ", destination)
 
-	go m.serveSession(ctx, session)
+	go m.serveSession(ctx, session, limit)
 	return nil
 }
 
@@ -159,8 +164,9 @@ func (m *DatagramV2Muxer) UnregisterSession(sessionID uuid.UUID) {
 	}
 }
 
-func (m *DatagramV2Muxer) serveSession(ctx context.Context, session *udpSession) {
+func (m *DatagramV2Muxer) serveSession(ctx context.Context, session *udpSession, limit uint64) {
 	defer m.UnregisterSession(session.id)
+	defer m.inbound.flowLimiter.Release(limit)
 
 	metadata := adapter.InboundContext{
 		Inbound:     m.inbound.Tag(),

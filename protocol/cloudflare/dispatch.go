@@ -185,6 +185,14 @@ func parseHTTPDestination(dest string) M.Socksaddr {
 func (i *Inbound) handleTCPStream(ctx context.Context, stream io.ReadWriteCloser, respWriter ConnectResponseWriter, metadata adapter.InboundContext) {
 	metadata.Network = N.NetworkTCP
 	i.logger.InfoContext(ctx, "inbound TCP connection to ", metadata.Destination)
+	limit := i.maxActiveFlows()
+	if !i.flowLimiter.Acquire(limit) {
+		err := E.New("too many active flows")
+		i.logger.ErrorContext(ctx, err)
+		respWriter.WriteResponse(err, nil)
+		return
+	}
+	defer i.flowLimiter.Release(limit)
 
 	err := respWriter.WriteResponse(nil, nil)
 	if err != nil {

@@ -44,6 +44,7 @@ type Inbound struct {
 	datagramVersion string
 	gracePeriod     time.Duration
 	configManager   *ConfigManager
+	flowLimiter     *FlowLimiter
 
 	connectionAccess sync.Mutex
 	connections      []io.Closer
@@ -119,6 +120,7 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 		datagramVersion:  datagramVersion,
 		gracePeriod:      gracePeriod,
 		configManager:    configManager,
+		flowLimiter:      &FlowLimiter{},
 		datagramV2Muxers: make(map[DatagramSender]*DatagramV2Muxer),
 		datagramV3Muxers: make(map[DatagramSender]*DatagramV3Muxer),
 	}, nil
@@ -172,6 +174,10 @@ func (i *Inbound) ApplyConfig(version int32, config []byte) ConfigUpdateResult {
 	}
 	i.logger.Info("updated ingress configuration (version ", result.LastAppliedVersion, ")")
 	return result
+}
+
+func (i *Inbound) maxActiveFlows() uint64 {
+	return i.configManager.Snapshot().WarpRouting.MaxActiveFlows
 }
 
 func (i *Inbound) Close() error {

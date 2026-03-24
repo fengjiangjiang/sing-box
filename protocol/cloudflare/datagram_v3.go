@@ -154,6 +154,12 @@ func (m *DatagramV3Muxer) handleRegistration(ctx context.Context, data []byte) {
 		}
 		return
 	}
+	limit := m.inbound.maxActiveFlows()
+	if !m.inbound.flowLimiter.Acquire(limit) {
+		m.sessionAccess.Unlock()
+		m.sendRegistrationResponse(requestID, v3ResponseTooManyActiveFlows, "")
+		return
+	}
 
 	session := newV3Session(requestID, destination, closeAfterIdle, m)
 	m.sessions[requestID] = session
@@ -167,7 +173,7 @@ func (m *DatagramV3Muxer) handleRegistration(ctx context.Context, data []byte) {
 		session.writeToOrigin(data[offset:])
 	}
 
-	go m.serveV3Session(ctx, session)
+	go m.serveV3Session(ctx, session, limit)
 }
 
 func (m *DatagramV3Muxer) handlePayload(data []byte) {
@@ -222,8 +228,9 @@ func (m *DatagramV3Muxer) unregisterSession(requestID RequestID) {
 	}
 }
 
-func (m *DatagramV3Muxer) serveV3Session(ctx context.Context, session *v3Session) {
+func (m *DatagramV3Muxer) serveV3Session(ctx context.Context, session *v3Session, limit uint64) {
 	defer m.unregisterSession(session.id)
+	defer m.inbound.flowLimiter.Release(limit)
 
 	metadata := adapter.InboundContext{
 		Inbound:     m.inbound.Tag(),
