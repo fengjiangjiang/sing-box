@@ -45,6 +45,7 @@ type Inbound struct {
 	gracePeriod     time.Duration
 	configManager   *ConfigManager
 	flowLimiter     *FlowLimiter
+	accessCache     *accessValidatorCache
 
 	connectionAccess sync.Mutex
 	connections      []io.Closer
@@ -121,6 +122,7 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 		gracePeriod:      gracePeriod,
 		configManager:    configManager,
 		flowLimiter:      &FlowLimiter{},
+		accessCache:      &accessValidatorCache{values: make(map[string]accessValidator)},
 		datagramV2Muxers: make(map[DatagramSender]*DatagramV2Muxer),
 		datagramV3Muxers: make(map[DatagramSender]*DatagramV3Muxer),
 	}, nil

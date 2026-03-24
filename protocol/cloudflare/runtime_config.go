@@ -363,6 +363,9 @@ func compileIngressRules(defaultOriginRequest OriginRequestConfig, rawRules []lo
 		if err := validateHostname(rule.Hostname, index == len(rawRules)-1); err != nil {
 			return nil, err
 		}
+		if err := validateAccessConfiguration(rule.OriginRequest.Access); err != nil {
+			return nil, err
+		}
 		service, err := parseResolvedService(rule.Service, rule.OriginRequest)
 		if err != nil {
 			return nil, err

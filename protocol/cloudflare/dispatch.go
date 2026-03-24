@@ -321,6 +321,18 @@ func (i *Inbound) roundTripHTTP(ctx context.Context, stream io.ReadWriteCloser, 
 		defer cancel()
 		httpRequest = httpRequest.WithContext(requestCtx)
 	}
+	if service.OriginRequest.Access.Required {
+		validator, err := i.accessCache.Get(service.OriginRequest.Access)
+		if err != nil {
+			i.logger.ErrorContext(ctx, "create access validator: ", err)
+			respWriter.WriteResponse(err, nil)
+			return
+		}
+		if err := validator.Validate(requestCtx, httpRequest); err != nil {
+			respWriter.WriteResponse(nil, encodeResponseHeaders(http.StatusForbidden, http.Header{}))
+			return
+		}
+	}
 
 	httpClient := &http.Client{
 		Transport: transport,
