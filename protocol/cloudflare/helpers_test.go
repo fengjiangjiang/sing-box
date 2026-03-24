@@ -170,7 +170,7 @@ func newTestInbound(t *testing.T, token string, protocol string, haConnections i
 		t.Fatal("create logger: ", err)
 	}
 
-	configManager, err := NewConfigManager(option.CloudflareTunnelInboundOptions{})
+	configManager, err := NewConfigManager()
 	if err != nil {
 		t.Fatal("create config manager: ", err)
 	}

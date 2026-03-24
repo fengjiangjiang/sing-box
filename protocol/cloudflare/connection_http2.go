@@ -44,6 +44,7 @@ type HTTP2Connection struct {
 	numPreviousAttempts uint8
 	registrationClient  *RegistrationClient
 	registrationResult  *RegistrationResult
+	controlStreamErr    error
 
 	activeRequests sync.WaitGroup
 	closeOnce      sync.Once
@@ -113,6 +114,9 @@ func (c *HTTP2Connection) Serve(ctx context.Context) error {
 		Handler: c,
 	})
 
+	if c.controlStreamErr != nil {
+		return c.controlStreamErr
+	}
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
@@ -161,10 +165,23 @@ func (c *HTTP2Connection) handleControlStream(ctx context.Context, r *http.Reque
 		ctx, c.credentials.Auth(), c.credentials.TunnelID, c.connIndex, options,
 	)
 	if err != nil {
+		c.controlStreamErr = err
 		c.logger.Error("register connection: ", err)
+		if c.registrationClient != nil {
+			c.registrationClient.Close()
+		}
+		go c.close()
+		return
+	}
+	if err := validateRegistrationResult(result); err != nil {
+		c.controlStreamErr = err
+		c.logger.Error("register connection: ", err)
+		c.registrationClient.Close()
+		go c.close()
 		return
 	}
 	c.registrationResult = result
+	c.inbound.notifyConnected(c.connIndex)
 
 	c.logger.Info("connected to ", result.Location,
 		" (connection ", result.ConnectionID, ")")

@@ -23,7 +23,7 @@ func newLimitedInbound(t *testing.T, limit uint64) *Inbound {
 	if err != nil {
 		t.Fatal(err)
 	}
-	configManager, err := NewConfigManager(option.CloudflareTunnelInboundOptions{})
+	configManager, err := NewConfigManager()
 	if err != nil {
 		t.Fatal(err)
 	}

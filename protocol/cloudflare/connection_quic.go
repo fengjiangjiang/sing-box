@@ -50,6 +50,7 @@ type QUICConnection struct {
 	gracePeriod         time.Duration
 	registrationClient  *RegistrationClient
 	registrationResult  *RegistrationResult
+	onConnected         func()
 
 	closeOnce sync.Once
 }
@@ -90,6 +91,7 @@ func NewQUICConnection(
 	numPreviousAttempts uint8,
 	gracePeriod time.Duration,
 	controlDialer N.Dialer,
+	onConnected func(),
 	logger log.ContextLogger,
 ) (*QUICConnection, error) {
 	rootCAs, err := cloudflareRootCertPool()
@@ -134,6 +136,7 @@ func NewQUICConnection(
 		features:            features,
 		numPreviousAttempts: numPreviousAttempts,
 		gracePeriod:         gracePeriod,
+		onConnected:         onConnected,
 	}, nil
 }
 
@@ -170,6 +173,7 @@ func (q *QUICConnection) Serve(ctx context.Context, handler StreamHandler) error
 	err = q.register(ctx, controlStream)
 	if err != nil {
 		controlStream.Close()
+		q.Close()
 		return err
 	}
 
@@ -208,7 +212,13 @@ func (q *QUICConnection) register(ctx context.Context, stream *quic.Stream) erro
 	if err != nil {
 		return E.Cause(err, "register connection")
 	}
+	if err := validateRegistrationResult(result); err != nil {
+		return err
+	}
 	q.registrationResult = result
+	if q.onConnected != nil {
+		q.onConnected()
+	}
 	return nil
 }
 

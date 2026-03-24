@@ -6,12 +6,12 @@ import (
 	"context"
 	stdTLS "crypto/tls"
 	"encoding/base64"
+	"errors"
 	"io"
 	"math/rand"
 	"net"
 	"net/http"
 	"net/url"
-	"os"
 	"sync"
 	"time"
 
@@ -32,6 +32,8 @@ import (
 func RegisterInbound(registry *inbound.Registry) {
 	inbound.Register[option.CloudflareTunnelInboundOptions](registry, C.TypeCloudflareTunnel, NewInbound)
 }
+
+var ErrNonRemoteManagedTunnelUnsupported = errors.New("cloudflare tunnel only supports remote-managed tunnels")
 
 type Inbound struct {
 	inbound.Adapter
@@ -63,12 +65,19 @@ type Inbound struct {
 	helloWorldAccess sync.Mutex
 	helloWorldServer *http.Server
 	helloWorldURL    *url.URL
+
+	connectedAccess  sync.Mutex
+	connectedIndices map[uint8]struct{}
+	connectedNotify  chan uint8
 }
 
 func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.CloudflareTunnelInboundOptions) (adapter.Inbound, error) {
-	credentials, err := parseCredentials(options.Token, options.CredentialPath)
+	if options.Token == "" {
+		return nil, E.New("missing token")
+	}
+	credentials, err := parseToken(options.Token)
 	if err != nil {
-		return nil, E.Cause(err, "parse credentials")
+		return nil, E.Cause(err, "parse token")
 	}
 
 	haConnections := options.HAConnections
@@ -96,7 +105,7 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 		gracePeriod = 30 * time.Second
 	}
 
-	configManager, err := NewConfigManager(options)
+	configManager, err := NewConfigManager()
 	if err != nil {
 		return nil, E.Cause(err, "build cloudflare tunnel runtime config")
 	}
@@ -139,6 +148,8 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 		controlDialer:    controlDialer,
 		datagramV2Muxers: make(map[DatagramSender]*DatagramV2Muxer),
 		datagramV3Muxers: make(map[DatagramSender]*DatagramV3Muxer),
+		connectedIndices: make(map[uint8]struct{}),
+		connectedNotify:  make(chan uint8, haConnections),
 	}, nil
 }
 
@@ -164,22 +175,34 @@ func (i *Inbound) Start(stage adapter.StartStage) error {
 	for connIndex := 0; connIndex < i.haConnections; connIndex++ {
 		i.done.Add(1)
 		go i.superviseConnection(uint8(connIndex), edgeAddrs, features)
-		if connIndex == 0 {
-			// Wait a bit for the first connection before starting others
-			select {
-			case <-time.After(time.Second):
-			case <-i.ctx.Done():
+		select {
+		case readyConnIndex := <-i.connectedNotify:
+			if readyConnIndex != uint8(connIndex) {
+				i.logger.Debug("received unexpected ready notification for connection ", readyConnIndex)
+			}
+		case <-time.After(firstConnectionReadyTimeout):
+		case <-i.ctx.Done():
+			if connIndex == 0 {
 				return i.ctx.Err()
 			}
-		} else {
-			select {
-			case <-time.After(time.Second):
-			case <-i.ctx.Done():
-				return nil
-			}
+			return nil
 		}
 	}
 	return nil
+}
+
+func (i *Inbound) notifyConnected(connIndex uint8) {
+	if i.connectedNotify == nil {
+		return
+	}
+	i.connectedAccess.Lock()
+	if _, loaded := i.connectedIndices[connIndex]; loaded {
+		i.connectedAccess.Unlock()
+		return
+	}
+	i.connectedIndices[connIndex] = struct{}{}
+	i.connectedAccess.Unlock()
+	i.connectedNotify <- connIndex
 }
 
 func (i *Inbound) ApplyConfig(version int32, config []byte) ConfigUpdateResult {
@@ -249,8 +272,9 @@ func (i *Inbound) ensureHelloWorldURL() (*url.URL, error) {
 }
 
 const (
-	backoffBaseTime = time.Second
-	backoffMaxTime  = 2 * time.Minute
+	backoffBaseTime             = time.Second
+	backoffMaxTime              = 2 * time.Minute
+	firstConnectionReadyTimeout = 15 * time.Second
 )
 
 func (i *Inbound) superviseConnection(connIndex uint8, edgeAddrs []*EdgeAddr, features []string) {
@@ -267,6 +291,11 @@ func (i *Inbound) superviseConnection(connIndex uint8, edgeAddrs []*EdgeAddr, fe
 		edgeAddr := edgeAddrs[rand.Intn(len(edgeAddrs))]
 		err := i.serveConnection(connIndex, edgeAddr, features, uint8(retries))
 		if err == nil || i.ctx.Err() != nil {
+			return
+		}
+		if errors.Is(err, ErrNonRemoteManagedTunnelUnsupported) {
+			i.logger.Error("connection ", connIndex, " failed permanently: ", err)
+			i.cancel()
 			return
 		}
 
@@ -294,6 +323,9 @@ func (i *Inbound) serveConnection(connIndex uint8, edgeAddr *EdgeAddr, features 
 		if err == nil || i.ctx.Err() != nil {
 			return err
 		}
+		if errors.Is(err, ErrNonRemoteManagedTunnelUnsupported) {
+			return err
+		}
 		i.logger.Warn("QUIC connection failed, falling back to HTTP/2: ", err)
 		return i.serveHTTP2(connIndex, edgeAddr, features, numPreviousAttempts)
 	case "http2":
@@ -309,7 +341,9 @@ func (i *Inbound) serveQUIC(connIndex uint8, edgeAddr *EdgeAddr, features []stri
 	connection, err := NewQUICConnection(
 		i.ctx, edgeAddr, connIndex,
 		i.credentials, i.connectorID,
-		features, numPreviousAttempts, i.gracePeriod, i.controlDialer, i.logger,
+		features, numPreviousAttempts, i.gracePeriod, i.controlDialer, func() {
+			i.notifyConnected(connIndex)
+		}, i.logger,
 	)
 	if err != nil {
 		return E.Cause(err, "create QUIC connection")
@@ -377,19 +411,6 @@ func flattenRegions(regions [][]*EdgeAddr) []*EdgeAddr {
 	return result
 }
 
-func parseCredentials(token string, credentialPath string) (Credentials, error) {
-	if token == "" && credentialPath == "" {
-		return Credentials{}, E.New("either token or credential_path must be specified")
-	}
-	if token != "" && credentialPath != "" {
-		return Credentials{}, E.New("token and credential_path are mutually exclusive")
-	}
-	if token != "" {
-		return parseToken(token)
-	}
-	return parseCredentialFile(credentialPath)
-}
-
 func parseToken(token string) (Credentials, error) {
 	data, err := base64.StdEncoding.DecodeString(token)
 	if err != nil {
@@ -401,20 +422,4 @@ func parseToken(token string) (Credentials, error) {
 		return Credentials{}, E.Cause(err, "unmarshal token")
 	}
 	return tunnelToken.ToCredentials(), nil
-}
-
-func parseCredentialFile(path string) (Credentials, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return Credentials{}, E.Cause(err, "read credential file")
-	}
-	var credentials Credentials
-	err = json.Unmarshal(data, &credentials)
-	if err != nil {
-		return Credentials{}, E.Cause(err, "unmarshal credential file")
-	}
-	if credentials.TunnelID == (uuid.UUID{}) {
-		return Credentials{}, E.New("credential file missing tunnel ID")
-	}
-	return credentials, nil
 }

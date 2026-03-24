@@ -59,7 +59,7 @@ func newSpecialServiceInboundWithRouter(t *testing.T, router adapter.Router) *In
 	if err != nil {
 		t.Fatal(err)
 	}
-	configManager, err := NewConfigManager(option.CloudflareTunnelInboundOptions{})
+	configManager, err := NewConfigManager()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,11 +102,9 @@ func startEchoListener(t *testing.T) net.Listener {
 	return listener
 }
 
-func newSocksProxyService(t *testing.T, rules []option.CloudflareTunnelIPRule) ResolvedService {
+func newSocksProxyService(t *testing.T, rules []IPRule) ResolvedService {
 	t.Helper()
-	service, err := parseResolvedService("socks-proxy", originRequestFromOption(option.CloudflareTunnelOriginRequestOptions{
-		IPRules: rules,
-	}))
+	service, err := parseResolvedService("socks-proxy", OriginRequestConfig{IPRules: rules})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -247,7 +245,7 @@ func TestHandleSocksProxyStream(t *testing.T) {
 
 	_, portText, _ := net.SplitHostPort(listener.Addr().String())
 	port, _ := strconv.Atoi(portText)
-	service := newSocksProxyService(t, []option.CloudflareTunnelIPRule{{
+	service := newSocksProxyService(t, []IPRule{{
 		Prefix: "127.0.0.0/8",
 		Ports:  []int{port},
 		Allow:  true,
@@ -286,7 +284,7 @@ func TestHandleSocksProxyStreamDenyRule(t *testing.T) {
 
 	_, portText, _ := net.SplitHostPort(listener.Addr().String())
 	port, _ := strconv.Atoi(portText)
-	service := newSocksProxyService(t, []option.CloudflareTunnelIPRule{{
+	service := newSocksProxyService(t, []IPRule{{
 		Prefix: "127.0.0.0/8",
 		Ports:  []int{port},
 		Allow:  false,
@@ -317,7 +315,7 @@ func TestHandleSocksProxyStreamPortMismatchDefaultDeny(t *testing.T) {
 
 	_, portText, _ := net.SplitHostPort(listener.Addr().String())
 	port, _ := strconv.Atoi(portText)
-	service := newSocksProxyService(t, []option.CloudflareTunnelIPRule{{
+	service := newSocksProxyService(t, []IPRule{{
 		Prefix: "127.0.0.0/8",
 		Ports:  []int{port + 1},
 		Allow:  true,
@@ -372,11 +370,11 @@ func TestHandleSocksProxyStreamRuleOrderFirstMatchWins(t *testing.T) {
 
 	_, portText, _ := net.SplitHostPort(listener.Addr().String())
 	port, _ := strconv.Atoi(portText)
-	allowFirst := newSocksProxyService(t, []option.CloudflareTunnelIPRule{
+	allowFirst := newSocksProxyService(t, []IPRule{
 		{Prefix: "127.0.0.0/8", Ports: []int{port}, Allow: true},
 		{Prefix: "127.0.0.1/32", Ports: []int{port}, Allow: false},
 	})
-	denyFirst := newSocksProxyService(t, []option.CloudflareTunnelIPRule{
+	denyFirst := newSocksProxyService(t, []IPRule{
 		{Prefix: "127.0.0.1/32", Ports: []int{port}, Allow: false},
 		{Prefix: "127.0.0.0/8", Ports: []int{port}, Allow: true},
 	})

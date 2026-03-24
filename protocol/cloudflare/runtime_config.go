@@ -12,7 +12,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/sagernet/sing-box/option"
 	E "github.com/sagernet/sing/common/exceptions"
 	M "github.com/sagernet/sing/common/metadata"
 
@@ -155,8 +154,8 @@ type ConfigManager struct {
 	activeConfig   RuntimeConfig
 }
 
-func NewConfigManager(options option.CloudflareTunnelInboundOptions) (*ConfigManager, error) {
-	config, err := buildLocalRuntimeConfig(options)
+func NewConfigManager() (*ConfigManager, error) {
+	config, err := defaultRuntimeConfig()
 	if err != nil {
 		return nil, err
 	}
@@ -237,26 +236,19 @@ func matchIngressHost(pattern, hostname string) bool {
 	return false
 }
 
-func buildLocalRuntimeConfig(options option.CloudflareTunnelInboundOptions) (RuntimeConfig, error) {
-	defaultOriginRequest := originRequestFromOption(options.OriginRequest)
-	warpRouting := warpRoutingFromOption(options.WarpRouting)
-	var ingressRules []localIngressRule
-	for _, rule := range options.Ingress {
-		ingressRules = append(ingressRules, localIngressRule{
-			Hostname:      rule.Hostname,
-			Path:          rule.Path,
-			Service:       rule.Service,
-			OriginRequest: mergeOptionOriginRequest(defaultOriginRequest, rule.OriginRequest),
-		})
-	}
-	compiledRules, err := compileIngressRules(defaultOriginRequest, ingressRules)
+func defaultRuntimeConfig() (RuntimeConfig, error) {
+	defaultOriginRequest := defaultOriginRequestConfig()
+	compiledRules, err := compileIngressRules(defaultOriginRequest, nil)
 	if err != nil {
 		return RuntimeConfig{}, err
 	}
 	return RuntimeConfig{
 		Ingress:       compiledRules,
 		OriginRequest: defaultOriginRequest,
-		WarpRouting:   warpRouting,
+		WarpRouting: WarpRoutingConfig{
+			ConnectTimeout: defaultWarpRoutingConnectTime,
+			TCPKeepAlive:   defaultWarpRoutingTCPKeepAlive,
+		},
 	}, nil
 }
 
@@ -554,117 +546,6 @@ func defaultOriginRequestConfig() OriginRequestConfig {
 	}
 }
 
-func originRequestFromOption(input option.CloudflareTunnelOriginRequestOptions) OriginRequestConfig {
-	config := defaultOriginRequestConfig()
-	if input.ConnectTimeout != 0 {
-		config.ConnectTimeout = time.Duration(input.ConnectTimeout)
-	}
-	if input.TLSTimeout != 0 {
-		config.TLSTimeout = time.Duration(input.TLSTimeout)
-	}
-	if input.TCPKeepAlive != 0 {
-		config.TCPKeepAlive = time.Duration(input.TCPKeepAlive)
-	}
-	if input.KeepAliveTimeout != 0 {
-		config.KeepAliveTimeout = time.Duration(input.KeepAliveTimeout)
-	}
-	if input.KeepAliveConnections != 0 {
-		config.KeepAliveConnections = input.KeepAliveConnections
-	}
-	config.NoHappyEyeballs = input.NoHappyEyeballs
-	config.HTTPHostHeader = input.HTTPHostHeader
-	config.OriginServerName = input.OriginServerName
-	config.MatchSNIToHost = input.MatchSNIToHost
-	config.CAPool = input.CAPool
-	config.NoTLSVerify = input.NoTLSVerify
-	config.DisableChunkedEncoding = input.DisableChunkedEncoding
-	config.BastionMode = input.BastionMode
-	if input.ProxyAddress != "" {
-		config.ProxyAddress = input.ProxyAddress
-	}
-	if input.ProxyPort != 0 {
-		config.ProxyPort = input.ProxyPort
-	}
-	config.ProxyType = input.ProxyType
-	config.HTTP2Origin = input.HTTP2Origin
-	config.Access = AccessConfig{
-		Required:    input.Access.Required,
-		TeamName:    input.Access.TeamName,
-		AudTag:      append([]string(nil), input.Access.AudTag...),
-		Environment: input.Access.Environment,
-	}
-	for _, rule := range input.IPRules {
-		config.IPRules = append(config.IPRules, IPRule{
-			Prefix: rule.Prefix,
-			Ports:  append([]int(nil), rule.Ports...),
-			Allow:  rule.Allow,
-		})
-	}
-	return config
-}
-
-func mergeOptionOriginRequest(base OriginRequestConfig, override option.CloudflareTunnelOriginRequestOptions) OriginRequestConfig {
-	result := base
-	if override.ConnectTimeout != 0 {
-		result.ConnectTimeout = time.Duration(override.ConnectTimeout)
-	}
-	if override.TLSTimeout != 0 {
-		result.TLSTimeout = time.Duration(override.TLSTimeout)
-	}
-	if override.TCPKeepAlive != 0 {
-		result.TCPKeepAlive = time.Duration(override.TCPKeepAlive)
-	}
-	if override.KeepAliveTimeout != 0 {
-		result.KeepAliveTimeout = time.Duration(override.KeepAliveTimeout)
-	}
-	if override.KeepAliveConnections != 0 {
-		result.KeepAliveConnections = override.KeepAliveConnections
-	}
-	result.NoHappyEyeballs = override.NoHappyEyeballs
-	if override.HTTPHostHeader != "" {
-		result.HTTPHostHeader = override.HTTPHostHeader
-	}
-	if override.OriginServerName != "" {
-		result.OriginServerName = override.OriginServerName
-	}
-	result.MatchSNIToHost = override.MatchSNIToHost
-	if override.CAPool != "" {
-		result.CAPool = override.CAPool
-	}
-	result.NoTLSVerify = override.NoTLSVerify
-	result.DisableChunkedEncoding = override.DisableChunkedEncoding
-	result.BastionMode = override.BastionMode
-	if override.ProxyAddress != "" {
-		result.ProxyAddress = override.ProxyAddress
-	}
-	if override.ProxyPort != 0 {
-		result.ProxyPort = override.ProxyPort
-	}
-	if override.ProxyType != "" {
-		result.ProxyType = override.ProxyType
-	}
-	if len(override.IPRules) > 0 {
-		result.IPRules = nil
-		for _, rule := range override.IPRules {
-			result.IPRules = append(result.IPRules, IPRule{
-				Prefix: rule.Prefix,
-				Ports:  append([]int(nil), rule.Ports...),
-				Allow:  rule.Allow,
-			})
-		}
-	}
-	result.HTTP2Origin = override.HTTP2Origin
-	if override.Access.Required || override.Access.TeamName != "" || len(override.Access.AudTag) > 0 || override.Access.Environment != "" {
-		result.Access = AccessConfig{
-			Required:    override.Access.Required,
-			TeamName:    override.Access.TeamName,
-			AudTag:      append([]string(nil), override.Access.AudTag...),
-			Environment: override.Access.Environment,
-		}
-	}
-	return result
-}
-
 func originRequestFromRemote(input remoteOriginRequestJSON) OriginRequestConfig {
 	config := defaultOriginRequestConfig()
 	if input.ConnectTimeout != 0 {
@@ -800,21 +681,6 @@ func mergeRemoteOriginRequest(base OriginRequestConfig, override remoteOriginReq
 		}
 	}
 	return result
-}
-
-func warpRoutingFromOption(input option.CloudflareTunnelWarpRoutingOptions) WarpRoutingConfig {
-	config := WarpRoutingConfig{
-		ConnectTimeout: defaultWarpRoutingConnectTime,
-		TCPKeepAlive:   defaultWarpRoutingTCPKeepAlive,
-		MaxActiveFlows: input.MaxActiveFlows,
-	}
-	if input.ConnectTimeout != 0 {
-		config.ConnectTimeout = time.Duration(input.ConnectTimeout)
-	}
-	if input.TCPKeepAlive != 0 {
-		config.TCPKeepAlive = time.Duration(input.TCPKeepAlive)
-	}
-	return config
 }
 
 func warpRoutingFromRemote(input remoteWarpRoutingJSON) WarpRoutingConfig {

@@ -150,6 +150,13 @@ func (c *RegistrationClient) Close() error {
 	)
 }
 
+func validateRegistrationResult(result *RegistrationResult) error {
+	if result == nil || result.TunnelIsRemotelyManaged {
+		return nil
+	}
+	return ErrNonRemoteManagedTunnelUnsupported
+}
+
 // BuildConnectionOptions creates the ConnectionOptions to send during registration.
 func BuildConnectionOptions(connectorID uuid.UUID, features []string, numPreviousAttempts uint8, originLocalIP net.IP) *RegistrationConnectionOptions {
 	return &RegistrationConnectionOptions{

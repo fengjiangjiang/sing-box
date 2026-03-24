@@ -6,12 +6,11 @@ import (
 	"testing"
 
 	"github.com/sagernet/sing-box/log"
-	"github.com/sagernet/sing-box/option"
 )
 
 func newTestIngressInbound(t *testing.T) *Inbound {
 	t.Helper()
-	configManager, err := NewConfigManager(option.CloudflareTunnelInboundOptions{})
+	configManager, err := NewConfigManager()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,6 +81,18 @@ func TestApplyConfigInvalidJSON(t *testing.T) {
 	}
 	if result.LastAppliedVersion != -1 {
 		t.Fatalf("expected version to stay -1, got %d", result.LastAppliedVersion)
+	}
+}
+
+func TestDefaultConfigIsCatchAll503(t *testing.T) {
+	inboundInstance := newTestIngressInbound(t)
+
+	service, loaded := inboundInstance.configManager.Resolve("any.example.com", "/")
+	if !loaded {
+		t.Fatal("expected default config to resolve catch-all rule")
+	}
+	if service.StatusCode != 503 {
+		t.Fatalf("expected catch-all 503, got %#v", service)
 	}
 }
 

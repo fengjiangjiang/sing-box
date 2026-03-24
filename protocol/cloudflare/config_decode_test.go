@@ -1,0 +1,28 @@
+//go:build with_cloudflare_tunnel
+
+package cloudflare
+
+import (
+	"context"
+	"testing"
+
+	"github.com/sagernet/sing-box/log"
+	"github.com/sagernet/sing-box/option"
+)
+
+func TestNewInboundRequiresToken(t *testing.T) {
+	_, err := NewInbound(context.Background(), nil, log.NewNOPFactory().NewLogger("test"), "test", option.CloudflareTunnelInboundOptions{})
+	if err == nil {
+		t.Fatal("expected missing token error")
+	}
+}
+
+func TestValidateRegistrationResultRejectsNonRemoteManaged(t *testing.T) {
+	err := validateRegistrationResult(&RegistrationResult{TunnelIsRemotelyManaged: false})
+	if err == nil {
+		t.Fatal("expected unsupported tunnel error")
+	}
+	if err != ErrNonRemoteManagedTunnelUnsupported {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
