@@ -208,9 +208,29 @@ func (i *Inbound) handleTCPStream(ctx context.Context, stream io.ReadWriteCloser
 }
 
 func (i *Inbound) handleHTTPService(ctx context.Context, stream io.ReadWriteCloser, respWriter ConnectResponseWriter, request *ConnectRequest, metadata adapter.InboundContext, service ResolvedService) {
+	validationRequest, err := buildMetadataOnlyHTTPRequest(ctx, request)
+	if err != nil {
+		i.logger.ErrorContext(ctx, "build request for access validation: ", err)
+		respWriter.WriteResponse(err, nil)
+		return
+	}
+	validationRequest = applyOriginRequest(validationRequest, service.OriginRequest)
+	if service.OriginRequest.Access.Required {
+		validator, err := i.accessCache.Get(service.OriginRequest.Access)
+		if err != nil {
+			i.logger.ErrorContext(ctx, "create access validator: ", err)
+			respWriter.WriteResponse(err, nil)
+			return
+		}
+		if err := validator.Validate(validationRequest.Context(), validationRequest); err != nil {
+			respWriter.WriteResponse(nil, encodeResponseHeaders(http.StatusForbidden, http.Header{}))
+			return
+		}
+	}
+
 	switch service.Kind {
 	case ResolvedServiceStatus:
-		err := respWriter.WriteResponse(nil, encodeResponseHeaders(service.StatusCode, http.Header{}))
+		err = respWriter.WriteResponse(nil, encodeResponseHeaders(service.StatusCode, http.Header{}))
 		if err != nil {
 			i.logger.ErrorContext(ctx, "write status service response: ", err)
 		}
@@ -320,18 +340,6 @@ func (i *Inbound) roundTripHTTP(ctx context.Context, stream io.ReadWriteCloser, 
 		requestCtx, cancel = context.WithTimeout(requestCtx, service.OriginRequest.ConnectTimeout)
 		defer cancel()
 		httpRequest = httpRequest.WithContext(requestCtx)
-	}
-	if service.OriginRequest.Access.Required {
-		validator, err := i.accessCache.Get(service.OriginRequest.Access)
-		if err != nil {
-			i.logger.ErrorContext(ctx, "create access validator: ", err)
-			respWriter.WriteResponse(err, nil)
-			return
-		}
-		if err := validator.Validate(requestCtx, httpRequest); err != nil {
-			respWriter.WriteResponse(nil, encodeResponseHeaders(http.StatusForbidden, http.Header{}))
-			return
-		}
 	}
 
 	httpClient := &http.Client{
@@ -496,6 +504,14 @@ func applyOriginRequest(request *http.Request, originRequest OriginRequestConfig
 		}
 	}
 	return request
+}
+
+func buildMetadataOnlyHTTPRequest(ctx context.Context, connectRequest *ConnectRequest) (*http.Request, error) {
+	return buildHTTPRequestFromMetadata(ctx, &ConnectRequest{
+		Dest:     connectRequest.Dest,
+		Type:     connectRequest.Type,
+		Metadata: append([]Metadata(nil), connectRequest.Metadata...),
+	}, http.NoBody)
 }
 
 func bidirectionalCopy(left, right io.ReadWriteCloser) {

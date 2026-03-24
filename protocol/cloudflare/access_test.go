@@ -4,16 +4,16 @@ package cloudflare
 
 import (
 	"context"
-	"io"
-	"net"
 	"net/http"
 	"testing"
 
+	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/inbound"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
 	E "github.com/sagernet/sing/common/exceptions"
+	M "github.com/sagernet/sing/common/metadata"
 )
 
 type fakeAccessValidator struct {
@@ -58,34 +58,94 @@ func TestRoundTripHTTPAccessDenied(t *testing.T) {
 	}
 
 	inboundInstance := newAccessTestInbound(t)
-	service := ResolvedService{
-		Kind: ResolvedServiceHTTP,
+	respWriter := &fakeConnectResponseWriter{}
+	request := &ConnectRequest{
+		Type: ConnectionTypeHTTP,
+		Dest: "http://127.0.0.1:8083/test",
+		Metadata: []Metadata{
+			{Key: metadataHTTPMethod, Val: http.MethodGet},
+			{Key: metadataHTTPHost, Val: "example.com"},
+		},
+	}
+	inboundInstance.handleHTTPService(context.Background(), nil, respWriter, request, adapter.InboundContext{}, ResolvedService{
+		Kind:        ResolvedServiceHTTP,
+		Destination: M.ParseSocksaddr("127.0.0.1:8083"),
 		OriginRequest: OriginRequestConfig{
 			Access: AccessConfig{
 				Required: true,
 				TeamName: "team",
 			},
 		},
+	})
+	if respWriter.status != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d", respWriter.status)
 	}
-	serverSide, clientSide := net.Pipe()
-	defer serverSide.Close()
-	defer clientSide.Close()
+}
 
+func TestHandleHTTPServiceStatusAccessDenied(t *testing.T) {
+	originalFactory := newAccessValidator
+	defer func() {
+		newAccessValidator = originalFactory
+	}()
+	newAccessValidator = func(access AccessConfig) (accessValidator, error) {
+		return &fakeAccessValidator{err: E.New("forbidden")}, nil
+	}
+
+	inboundInstance := newAccessTestInbound(t)
 	respWriter := &fakeConnectResponseWriter{}
 	request := &ConnectRequest{
 		Type: ConnectionTypeHTTP,
-		Dest: "http://127.0.0.1:8083",
+		Dest: "https://example.com/status",
 		Metadata: []Metadata{
 			{Key: metadataHTTPMethod, Val: http.MethodGet},
 			{Key: metadataHTTPHost, Val: "example.com"},
 		},
 	}
-	go func() {
-		defer clientSide.Close()
-		_, _ = io.Copy(io.Discard, clientSide)
-	}()
+	inboundInstance.handleHTTPService(context.Background(), nil, respWriter, request, adapter.InboundContext{}, ResolvedService{
+		Kind: ResolvedServiceStatus,
+		OriginRequest: OriginRequestConfig{
+			Access: AccessConfig{
+				Required: true,
+				TeamName: "team",
+			},
+		},
+		StatusCode: 404,
+	})
+	if respWriter.status != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d", respWriter.status)
+	}
+}
 
-	inboundInstance.roundTripHTTP(context.Background(), serverSide, respWriter, request, service, &http.Transport{})
+func TestHandleHTTPServiceStreamAccessDenied(t *testing.T) {
+	originalFactory := newAccessValidator
+	defer func() {
+		newAccessValidator = originalFactory
+	}()
+	newAccessValidator = func(access AccessConfig) (accessValidator, error) {
+		return &fakeAccessValidator{err: E.New("forbidden")}, nil
+	}
+
+	inboundInstance := newAccessTestInbound(t)
+	respWriter := &fakeConnectResponseWriter{}
+	request := &ConnectRequest{
+		Type: ConnectionTypeWebsocket,
+		Dest: "https://example.com/ws",
+		Metadata: []Metadata{
+			{Key: metadataHTTPMethod, Val: http.MethodGet},
+			{Key: metadataHTTPHost, Val: "example.com"},
+			{Key: metadataHTTPHeader + ":Sec-WebSocket-Key", Val: "dGhlIHNhbXBsZSBub25jZQ=="},
+		},
+	}
+	inboundInstance.handleHTTPService(context.Background(), nil, respWriter, request, adapter.InboundContext{}, ResolvedService{
+		Kind:        ResolvedServiceStream,
+		Destination: M.ParseSocksaddr("127.0.0.1:8080"),
+		OriginRequest: OriginRequestConfig{
+			Access: AccessConfig{
+				Required: true,
+				TeamName: "team",
+			},
+		},
+	})
 	if respWriter.status != http.StatusForbidden {
 		t.Fatalf("expected 403, got %d", respWriter.status)
 	}
