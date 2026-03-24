@@ -1,4 +1,4 @@
-//go:build with_cloudflare_tunnel
+//go:build with_cloudflared
 
 package cloudflare
 
@@ -10,10 +10,11 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/coreos/go-oidc/v3/oidc"
 	E "github.com/sagernet/sing/common/exceptions"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
+
+	"github.com/coreos/go-oidc/v3/oidc"
 )
 
 const accessJWTAssertionHeader = "Cf-Access-Jwt-Assertion"

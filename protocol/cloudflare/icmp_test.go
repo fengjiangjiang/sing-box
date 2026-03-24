@@ -1,4 +1,4 @@
-//go:build with_cloudflare_tunnel
+//go:build with_cloudflared
 
 package cloudflare
 
@@ -71,7 +71,7 @@ func TestICMPBridgeHandleV2RoutesEchoRequest(t *testing.T) {
 		},
 	}
 	inboundInstance := &Inbound{
-		Adapter: inbound.NewAdapter(C.TypeCloudflareTunnel, "test"),
+		Adapter: inbound.NewAdapter(C.TypeCloudflared, "test"),
 		router:  router,
 	}
 	sender := &captureDatagramSender{}
@@ -117,7 +117,7 @@ func TestICMPBridgeHandleV2TracedReply(t *testing.T) {
 		},
 	}
 	inboundInstance := &Inbound{
-		Adapter: inbound.NewAdapter(C.TypeCloudflareTunnel, "test"),
+		Adapter: inbound.NewAdapter(C.TypeCloudflared, "test"),
 		router:  router,
 	}
 	bridge := NewICMPBridge(inboundInstance, sender, icmpWireV2)
@@ -151,7 +151,7 @@ func TestICMPBridgeHandleV3Reply(t *testing.T) {
 		},
 	}
 	inboundInstance := &Inbound{
-		Adapter: inbound.NewAdapter(C.TypeCloudflareTunnel, "test"),
+		Adapter: inbound.NewAdapter(C.TypeCloudflared, "test"),
 		router:  router,
 	}
 	bridge := NewICMPBridge(inboundInstance, sender, icmpWireV3)
@@ -178,7 +178,7 @@ func TestICMPBridgeDropsNonEcho(t *testing.T) {
 		},
 	}
 	inboundInstance := &Inbound{
-		Adapter: inbound.NewAdapter(C.TypeCloudflareTunnel, "test"),
+		Adapter: inbound.NewAdapter(C.TypeCloudflared, "test"),
 		router:  router,
 	}
 	sender := &captureDatagramSender{}

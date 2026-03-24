@@ -1,4 +1,4 @@
-//go:build with_cloudflare_tunnel
+//go:build with_cloudflared
 
 package cloudflare
 
@@ -30,10 +30,10 @@ import (
 )
 
 func RegisterInbound(registry *inbound.Registry) {
-	inbound.Register[option.CloudflareTunnelInboundOptions](registry, C.TypeCloudflareTunnel, NewInbound)
+	inbound.Register[option.CloudflaredInboundOptions](registry, C.TypeCloudflared, NewInbound)
 }
 
-var ErrNonRemoteManagedTunnelUnsupported = errors.New("cloudflare tunnel only supports remote-managed tunnels")
+var ErrNonRemoteManagedTunnelUnsupported = errors.New("cloudflared only supports remote-managed tunnels")
 
 type Inbound struct {
 	inbound.Adapter
@@ -71,7 +71,7 @@ type Inbound struct {
 	connectedNotify  chan uint8
 }
 
-func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.CloudflareTunnelInboundOptions) (adapter.Inbound, error) {
+func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.CloudflaredInboundOptions) (adapter.Inbound, error) {
 	if options.Token == "" {
 		return nil, E.New("missing token")
 	}
@@ -107,7 +107,7 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 
 	configManager, err := NewConfigManager()
 	if err != nil {
-		return nil, E.Cause(err, "build cloudflare tunnel runtime config")
+		return nil, E.Cause(err, "build cloudflared runtime config")
 	}
 	controlDialer, err := boxDialer.NewWithOptions(boxDialer.Options{
 		Context:        ctx,
@@ -115,7 +115,7 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 		RemoteIsDomain: true,
 	})
 	if err != nil {
-		return nil, E.Cause(err, "build cloudflare tunnel control dialer")
+		return nil, E.Cause(err, "build cloudflared control dialer")
 	}
 
 	region := options.Region
@@ -129,7 +129,7 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 	inboundCtx, cancel := context.WithCancel(ctx)
 
 	return &Inbound{
-		Adapter:          inbound.NewAdapter(C.TypeCloudflareTunnel, tag),
+		Adapter:          inbound.NewAdapter(C.TypeCloudflared, tag),
 		ctx:              inboundCtx,
 		cancel:           cancel,
 		router:           router,

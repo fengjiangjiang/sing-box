@@ -1,4 +1,4 @@
-//go:build with_cloudflare_tunnel
+//go:build with_cloudflared
 
 package cloudflare
 
@@ -177,7 +177,7 @@ func newTestInbound(t *testing.T, token string, protocol string, haConnections i
 
 	ctx, cancel := context.WithCancel(context.Background())
 	inboundInstance := &Inbound{
-		Adapter:          inbound.NewAdapter(C.TypeCloudflareTunnel, "test"),
+		Adapter:          inbound.NewAdapter(C.TypeCloudflared, "test"),
 		ctx:              ctx,
 		cancel:           cancel,
 		router:           &testRouter{},

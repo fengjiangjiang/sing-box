@@ -1,4 +1,4 @@
-//go:build with_cloudflare_tunnel
+//go:build with_cloudflared
 
 package cloudflare
 
@@ -14,7 +14,7 @@ import (
 func TestDatagramV3RegistrationDestinationUnreachable(t *testing.T) {
 	sender := &captureDatagramSender{}
 	inboundInstance := &Inbound{
-		Adapter:     inbound.NewAdapter(C.TypeCloudflareTunnel, "test"),
+		Adapter:     inbound.NewAdapter(C.TypeCloudflared, "test"),
 		flowLimiter: &FlowLimiter{},
 	}
 	muxer := NewDatagramV3Muxer(inboundInstance, sender, nil)
@@ -40,7 +40,7 @@ func TestDatagramV3RegistrationDestinationUnreachable(t *testing.T) {
 func TestDatagramV3RegistrationErrorWithMessage(t *testing.T) {
 	sender := &captureDatagramSender{}
 	inboundInstance := &Inbound{
-		Adapter:     inbound.NewAdapter(C.TypeCloudflareTunnel, "test"),
+		Adapter:     inbound.NewAdapter(C.TypeCloudflared, "test"),
 		flowLimiter: &FlowLimiter{},
 	}
 	muxer := NewDatagramV3Muxer(inboundInstance, sender, nil)

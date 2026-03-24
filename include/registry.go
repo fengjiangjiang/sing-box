@@ -66,7 +66,7 @@ func InboundRegistry() *inbound.Registry {
 	anytls.RegisterInbound(registry)
 
 	registerQUICInbounds(registry)
-	registerCloudflareTunnelInbound(registry)
+	registerCloudflaredInbound(registry)
 	registerStubForRemovedInbounds(registry)
 
 	return registry

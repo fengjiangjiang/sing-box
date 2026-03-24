@@ -1,4 +1,4 @@
-//go:build with_cloudflare_tunnel
+//go:build with_cloudflared
 
 package include
 
@@ -7,6 +7,6 @@ import (
 	"github.com/sagernet/sing-box/protocol/cloudflare"
 )
 
-func registerCloudflareTunnelInbound(registry *inbound.Registry) {
+func registerCloudflaredInbound(registry *inbound.Registry) {
 	cloudflare.RegisterInbound(registry)
 }

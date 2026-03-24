@@ -2,7 +2,7 @@ package option
 
 import "github.com/sagernet/sing/common/json/badoption"
 
-type CloudflareTunnelInboundOptions struct {
+type CloudflaredInboundOptions struct {
 	Token           string             `json:"token,omitempty"`
 	HAConnections   int                `json:"ha_connections,omitempty"`
 	Protocol        string             `json:"protocol,omitempty"`

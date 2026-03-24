@@ -1,4 +1,4 @@
-//go:build with_cloudflare_tunnel
+//go:build with_cloudflared
 
 package cloudflare
 
@@ -64,7 +64,7 @@ func newSpecialServiceInboundWithRouter(t *testing.T, router adapter.Router) *In
 		t.Fatal(err)
 	}
 	return &Inbound{
-		Adapter:       inbound.NewAdapter(C.TypeCloudflareTunnel, "test"),
+		Adapter:       inbound.NewAdapter(C.TypeCloudflared, "test"),
 		router:        router,
 		logger:        logFactory.NewLogger("test"),
 		configManager: configManager,

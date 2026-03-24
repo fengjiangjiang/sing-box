@@ -1,4 +1,4 @@
-//go:build with_cloudflare_tunnel
+//go:build with_cloudflared
 
 package cloudflare
 
@@ -11,7 +11,7 @@ import (
 )
 
 func TestNewInboundRequiresToken(t *testing.T) {
-	_, err := NewInbound(context.Background(), nil, log.NewNOPFactory().NewLogger("test"), "test", option.CloudflareTunnelInboundOptions{})
+	_, err := NewInbound(context.Background(), nil, log.NewNOPFactory().NewLogger("test"), "test", option.CloudflaredInboundOptions{})
 	if err == nil {
 		t.Fatal("expected missing token error")
 	}

@@ -1,4 +1,4 @@
-//go:build with_cloudflare_tunnel
+//go:build with_cloudflared
 
 package cloudflare
 
@@ -32,7 +32,7 @@ func newAccessTestInbound(t *testing.T) *Inbound {
 		t.Fatal(err)
 	}
 	return &Inbound{
-		Adapter:       inbound.NewAdapter(C.TypeCloudflareTunnel, "test"),
+		Adapter:       inbound.NewAdapter(C.TypeCloudflared, "test"),
 		logger:        logFactory.NewLogger("test"),
 		accessCache:   &accessValidatorCache{values: make(map[string]accessValidator), dialer: N.SystemDialer},
 		router:        &testRouter{},
