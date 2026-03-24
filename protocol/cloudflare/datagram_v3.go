@@ -61,6 +61,7 @@ type DatagramV3Muxer struct {
 	inbound *Inbound
 	logger  log.ContextLogger
 	sender  DatagramSender
+	icmp    *ICMPBridge
 
 	sessionAccess sync.RWMutex
 	sessions      map[RequestID]*v3Session
@@ -72,6 +73,7 @@ func NewDatagramV3Muxer(inbound *Inbound, sender DatagramSender, logger log.Cont
 		inbound:  inbound,
 		logger:   logger,
 		sender:   sender,
+		icmp:     NewICMPBridge(inbound, sender, icmpWireV3),
 		sessions: make(map[RequestID]*v3Session),
 	}
 }
@@ -91,8 +93,9 @@ func (m *DatagramV3Muxer) HandleDatagram(ctx context.Context, data []byte) {
 	case DatagramV3TypePayload:
 		m.handlePayload(payload)
 	case DatagramV3TypeICMP:
-		// TODO: ICMP handling
-		m.logger.Debug("received V3 ICMP datagram (not yet implemented)")
+		if err := m.icmp.HandleV3(ctx, payload); err != nil {
+			m.logger.Debug("drop V3 ICMP datagram: ", err)
+		}
 	case DatagramV3TypeRegistrationResponse:
 		// Unexpected - we never send registrations
 		m.logger.Debug("received unexpected V3 registration response")

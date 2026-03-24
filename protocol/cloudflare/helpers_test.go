@@ -21,6 +21,7 @@ import (
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
+	"github.com/sagernet/sing-tun"
 	N "github.com/sagernet/sing/common/network"
 
 	"github.com/google/uuid"
@@ -80,7 +81,13 @@ func startOriginServer(t *testing.T) {
 	})
 }
 
-type testRouter struct{}
+type testRouter struct {
+	preMatch func(metadata adapter.InboundContext, routeContext tun.DirectRouteContext, timeout time.Duration, supportBypass bool) (tun.DirectRouteDestination, error)
+}
+
+func (r *testRouter) Start(stage adapter.StartStage) error { return nil }
+
+func (r *testRouter) Close() error { return nil }
 
 func (r *testRouter) RouteConnection(ctx context.Context, conn net.Conn, metadata adapter.InboundContext) error {
 	destination := metadata.Destination.String()
@@ -129,6 +136,27 @@ func (r *testRouter) RouteConnectionEx(ctx context.Context, conn net.Conn, metad
 func (r *testRouter) RoutePacketConnectionEx(ctx context.Context, conn N.PacketConn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) {
 	onClose(nil)
 }
+
+func (r *testRouter) PreMatch(metadata adapter.InboundContext, routeContext tun.DirectRouteContext, timeout time.Duration, supportBypass bool) (tun.DirectRouteDestination, error) {
+	if r.preMatch != nil {
+		return r.preMatch(metadata, routeContext, timeout, supportBypass)
+	}
+	return nil, nil
+}
+
+func (r *testRouter) RuleSet(tag string) (adapter.RuleSet, bool) { return nil, false }
+
+func (r *testRouter) Rules() []adapter.Rule { return nil }
+
+func (r *testRouter) NeedFindProcess() bool { return false }
+
+func (r *testRouter) NeedFindNeighbor() bool { return false }
+
+func (r *testRouter) NeighborResolver() adapter.NeighborResolver { return nil }
+
+func (r *testRouter) AppendTracker(tracker adapter.ConnectionTracker) {}
+
+func (r *testRouter) ResetNetwork() {}
 
 func newTestInbound(t *testing.T, token string, protocol string, haConnections int) *Inbound {
 	t.Helper()

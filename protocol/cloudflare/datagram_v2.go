@@ -42,6 +42,7 @@ type DatagramV2Muxer struct {
 	inbound *Inbound
 	logger  log.ContextLogger
 	sender  DatagramSender
+	icmp    *ICMPBridge
 
 	sessionAccess sync.RWMutex
 	sessions      map[uuid.UUID]*udpSession
@@ -53,6 +54,7 @@ func NewDatagramV2Muxer(inbound *Inbound, sender DatagramSender, logger log.Cont
 		inbound:  inbound,
 		logger:   logger,
 		sender:   sender,
+		icmp:     NewICMPBridge(inbound, sender, icmpWireV2),
 		sessions: make(map[uuid.UUID]*udpSession),
 	}
 }
@@ -70,10 +72,13 @@ func (m *DatagramV2Muxer) HandleDatagram(ctx context.Context, data []byte) {
 	case DatagramV2TypeUDP:
 		m.handleUDPDatagram(ctx, payload)
 	case DatagramV2TypeIP:
-		// TODO: ICMP handling
-		m.logger.Debug("received V2 IP datagram (ICMP not yet implemented)")
+		if err := m.icmp.HandleV2(ctx, datagramType, payload); err != nil {
+			m.logger.Debug("drop V2 ICMP datagram: ", err)
+		}
 	case DatagramV2TypeIPWithTrace:
-		m.logger.Debug("received V2 IP+trace datagram")
+		if err := m.icmp.HandleV2(ctx, datagramType, payload); err != nil {
+			m.logger.Debug("drop V2 traced ICMP datagram: ", err)
+		}
 	case DatagramV2TypeTracingSpan:
 		// Tracing spans, ignore
 	}

@@ -33,7 +33,7 @@ type Inbound struct {
 	inbound.Adapter
 	ctx             context.Context
 	cancel          context.CancelFunc
-	router          adapter.ConnectionRouterEx
+	router          adapter.Router
 	logger          log.ContextLogger
 	credentials     Credentials
 	connectorID     uuid.UUID
