@@ -8,13 +8,14 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"runtime"
 	"sync"
 	"time"
 
 	"github.com/sagernet/quic-go"
 	"github.com/sagernet/sing-box/log"
 	E "github.com/sagernet/sing/common/exceptions"
+	M "github.com/sagernet/sing/common/metadata"
+	N "github.com/sagernet/sing/common/network"
 
 	"github.com/google/uuid"
 )
@@ -88,6 +89,7 @@ func NewQUICConnection(
 	features []string,
 	numPreviousAttempts uint8,
 	gracePeriod time.Duration,
+	controlDialer N.Dialer,
 	logger log.ContextLogger,
 ) (*QUICConnection, error) {
 	rootCAs, err := cloudflareRootCertPool()
@@ -111,7 +113,7 @@ func NewQUICConnection(
 		InitialPacketSize:     quicInitialPacketSize(edgeAddr.IPVersion),
 	}
 
-	udpConn, err := createUDPConnForConnIndex(connIndex, edgeAddr)
+	udpConn, err := createUDPConnForConnIndex(ctx, connIndex, edgeAddr, controlDialer)
 	if err != nil {
 		return nil, E.Cause(err, "listen UDP for QUIC edge")
 	}
@@ -135,29 +137,18 @@ func NewQUICConnection(
 	}, nil
 }
 
-func createUDPConnForConnIndex(connIndex uint8, edgeAddr *EdgeAddr) (*net.UDPConn, error) {
+func createUDPConnForConnIndex(ctx context.Context, connIndex uint8, edgeAddr *EdgeAddr, controlDialer N.Dialer) (*net.UDPConn, error) {
 	quicPortAccess.Lock()
 	defer quicPortAccess.Unlock()
 
-	network := "udp"
-	if runtime.GOOS == "darwin" {
-		if edgeAddr.IPVersion == 4 {
-			network = "udp4"
-		} else {
-			network = "udp6"
-		}
-	}
-
-	if port, loaded := quicPortByConnIndex[connIndex]; loaded {
-		udpConn, err := net.ListenUDP(network, &net.UDPAddr{Port: port})
-		if err == nil {
-			return udpConn, nil
-		}
-	}
-
-	udpConn, err := net.ListenUDP(network, &net.UDPAddr{Port: 0})
+	packetConn, err := controlDialer.ListenPacket(ctx, M.SocksaddrFrom(edgeAddr.UDP.AddrPort().Addr(), edgeAddr.UDP.AddrPort().Port()))
 	if err != nil {
 		return nil, err
+	}
+	udpConn, ok := packetConn.(*net.UDPConn)
+	if !ok {
+		packetConn.Close()
+		return nil, fmt.Errorf("unexpected packet conn type %T", packetConn)
 	}
 	udpAddr, ok := udpConn.LocalAddr().(*net.UDPAddr)
 	if !ok {

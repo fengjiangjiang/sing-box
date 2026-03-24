@@ -14,6 +14,7 @@ import (
 	"github.com/sagernet/sing-box/option"
 	E "github.com/sagernet/sing/common/exceptions"
 	M "github.com/sagernet/sing/common/metadata"
+	N "github.com/sagernet/sing/common/network"
 )
 
 type fakeAccessValidator struct {
@@ -31,10 +32,11 @@ func newAccessTestInbound(t *testing.T) *Inbound {
 		t.Fatal(err)
 	}
 	return &Inbound{
-		Adapter:     inbound.NewAdapter(C.TypeCloudflareTunnel, "test"),
-		logger:      logFactory.NewLogger("test"),
-		accessCache: &accessValidatorCache{values: make(map[string]accessValidator)},
-		router:      &testRouter{},
+		Adapter:       inbound.NewAdapter(C.TypeCloudflareTunnel, "test"),
+		logger:        logFactory.NewLogger("test"),
+		accessCache:   &accessValidatorCache{values: make(map[string]accessValidator), dialer: N.SystemDialer},
+		router:        &testRouter{},
+		controlDialer: N.SystemDialer,
 	}
 }
 
@@ -53,7 +55,7 @@ func TestRoundTripHTTPAccessDenied(t *testing.T) {
 	defer func() {
 		newAccessValidator = originalFactory
 	}()
-	newAccessValidator = func(access AccessConfig) (accessValidator, error) {
+	newAccessValidator = func(access AccessConfig, dialer N.Dialer) (accessValidator, error) {
 		return &fakeAccessValidator{err: E.New("forbidden")}, nil
 	}
 
@@ -87,7 +89,7 @@ func TestHandleHTTPServiceStatusAccessDenied(t *testing.T) {
 	defer func() {
 		newAccessValidator = originalFactory
 	}()
-	newAccessValidator = func(access AccessConfig) (accessValidator, error) {
+	newAccessValidator = func(access AccessConfig, dialer N.Dialer) (accessValidator, error) {
 		return &fakeAccessValidator{err: E.New("forbidden")}, nil
 	}
 
@@ -121,7 +123,7 @@ func TestHandleHTTPServiceStreamAccessDenied(t *testing.T) {
 	defer func() {
 		newAccessValidator = originalFactory
 	}()
-	newAccessValidator = func(access AccessConfig) (accessValidator, error) {
+	newAccessValidator = func(access AccessConfig, dialer N.Dialer) (accessValidator, error) {
 		return &fakeAccessValidator{err: E.New("forbidden")}, nil
 	}
 

@@ -16,11 +16,13 @@ import (
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/inbound"
+	boxDialer "github.com/sagernet/sing-box/common/dialer"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
 	E "github.com/sagernet/sing/common/exceptions"
 	"github.com/sagernet/sing/common/json"
+	N "github.com/sagernet/sing/common/network"
 
 	"github.com/google/uuid"
 )
@@ -46,6 +48,7 @@ type Inbound struct {
 	configManager   *ConfigManager
 	flowLimiter     *FlowLimiter
 	accessCache     *accessValidatorCache
+	controlDialer   N.Dialer
 
 	connectionAccess sync.Mutex
 	connections      []io.Closer
@@ -95,6 +98,14 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 	if err != nil {
 		return nil, E.Cause(err, "build cloudflare tunnel runtime config")
 	}
+	controlDialer, err := boxDialer.NewWithOptions(boxDialer.Options{
+		Context:        ctx,
+		Options:        options.ControlDialer,
+		RemoteIsDomain: true,
+	})
+	if err != nil {
+		return nil, E.Cause(err, "build cloudflare tunnel control dialer")
+	}
 
 	region := options.Region
 	if region != "" && credentials.Endpoint != "" {
@@ -122,7 +133,8 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 		gracePeriod:      gracePeriod,
 		configManager:    configManager,
 		flowLimiter:      &FlowLimiter{},
-		accessCache:      &accessValidatorCache{values: make(map[string]accessValidator)},
+		accessCache:      &accessValidatorCache{values: make(map[string]accessValidator), dialer: controlDialer},
+		controlDialer:    controlDialer,
 		datagramV2Muxers: make(map[DatagramSender]*DatagramV2Muxer),
 		datagramV3Muxers: make(map[DatagramSender]*DatagramV3Muxer),
 	}, nil
@@ -135,7 +147,7 @@ func (i *Inbound) Start(stage adapter.StartStage) error {
 
 	i.logger.Info("starting Cloudflare Tunnel with ", i.haConnections, " HA connections")
 
-	regions, err := DiscoverEdge(i.ctx, i.region)
+	regions, err := DiscoverEdge(i.ctx, i.region, i.controlDialer)
 	if err != nil {
 		return E.Cause(err, "discover edge")
 	}
@@ -287,7 +299,7 @@ func (i *Inbound) serveQUIC(connIndex uint8, edgeAddr *EdgeAddr, features []stri
 	connection, err := NewQUICConnection(
 		i.ctx, edgeAddr, connIndex,
 		i.credentials, i.connectorID,
-		features, numPreviousAttempts, i.gracePeriod, i.logger,
+		features, numPreviousAttempts, i.gracePeriod, i.controlDialer, i.logger,
 	)
 	if err != nil {
 		return E.Cause(err, "create QUIC connection")

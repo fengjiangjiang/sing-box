@@ -17,6 +17,7 @@ import (
 	"github.com/sagernet/sing-box/log"
 	E "github.com/sagernet/sing/common/exceptions"
 	"github.com/sagernet/sing/common/json"
+	M "github.com/sagernet/sing/common/metadata"
 
 	"github.com/google/uuid"
 	"golang.org/x/net/http2"
@@ -71,8 +72,7 @@ func NewHTTP2Connection(
 		ServerName: h2EdgeSNI,
 	}
 
-	dialer := &net.Dialer{}
-	tcpConn, err := dialer.DialContext(ctx, "tcp", edgeAddr.TCP.String())
+	tcpConn, err := inbound.controlDialer.DialContext(ctx, "tcp", M.SocksaddrFrom(edgeAddr.TCP.AddrPort().Addr(), edgeAddr.TCP.AddrPort().Port()))
 	if err != nil {
 		return nil, E.Cause(err, "dial edge TCP")
 	}
@@ -113,10 +113,13 @@ func (c *HTTP2Connection) Serve(ctx context.Context) error {
 		Handler: c,
 	})
 
-	if c.registrationResult != nil {
-		return nil
+	if ctx.Err() != nil {
+		return ctx.Err()
 	}
-	return E.New("edge connection closed before registration")
+	if c.registrationResult == nil {
+		return E.New("edge connection closed before registration")
+	}
+	return E.New("edge connection closed")
 }
 
 func (c *HTTP2Connection) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -167,6 +170,12 @@ func (c *HTTP2Connection) handleControlStream(ctx context.Context, r *http.Reque
 		" (connection ", result.ConnectionID, ")")
 
 	<-ctx.Done()
+	unregisterCtx, cancel := context.WithTimeout(context.Background(), c.gracePeriod)
+	defer cancel()
+	err = c.registrationClient.Unregister(unregisterCtx)
+	if err != nil {
+		c.logger.Debug("failed to unregister: ", err)
+	}
 	c.registrationClient.Close()
 }
 

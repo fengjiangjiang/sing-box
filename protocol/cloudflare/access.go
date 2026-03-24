@@ -5,19 +5,29 @@ package cloudflare
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
 
 	"github.com/coreos/go-oidc/v3/oidc"
 	E "github.com/sagernet/sing/common/exceptions"
+	M "github.com/sagernet/sing/common/metadata"
+	N "github.com/sagernet/sing/common/network"
 )
 
 const accessJWTAssertionHeader = "Cf-Access-Jwt-Assertion"
 
-var newAccessValidator = func(access AccessConfig) (accessValidator, error) {
+var newAccessValidator = func(access AccessConfig, dialer N.Dialer) (accessValidator, error) {
 	issuerURL := accessIssuerURL(access.TeamName, access.Environment)
-	keySet := oidc.NewRemoteKeySet(context.Background(), issuerURL+"/cdn-cgi/access/certs")
+	client := &http.Client{
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+				return dialer.DialContext(ctx, network, M.ParseSocksaddr(address))
+			},
+		},
+	}
+	keySet := oidc.NewRemoteKeySet(oidc.ClientContext(context.Background(), client), issuerURL+"/cdn-cgi/access/certs")
 	verifier := oidc.NewVerifier(issuerURL, keySet, &oidc.Config{
 		SkipClientIDCheck: true,
 	})
@@ -82,6 +92,7 @@ func accessValidatorKey(access AccessConfig) string {
 type accessValidatorCache struct {
 	access sync.RWMutex
 	values map[string]accessValidator
+	dialer N.Dialer
 }
 
 func (c *accessValidatorCache) Get(accessConfig AccessConfig) (accessValidator, error) {
@@ -93,7 +104,7 @@ func (c *accessValidatorCache) Get(accessConfig AccessConfig) (accessValidator, 
 		return validator, nil
 	}
 
-	validator, err := newAccessValidator(accessConfig)
+	validator, err := newAccessValidator(accessConfig, c.dialer)
 	if err != nil {
 		return nil, err
 	}

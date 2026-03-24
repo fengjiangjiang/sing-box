@@ -9,6 +9,8 @@ import (
 	"time"
 
 	E "github.com/sagernet/sing/common/exceptions"
+	M "github.com/sagernet/sing/common/metadata"
+	N "github.com/sagernet/sing/common/network"
 )
 
 const (
@@ -37,10 +39,10 @@ type EdgeAddr struct {
 
 // DiscoverEdge performs SRV-based edge discovery and returns addresses
 // partitioned into regions (typically 2).
-func DiscoverEdge(ctx context.Context, region string) ([][]*EdgeAddr, error) {
+func DiscoverEdge(ctx context.Context, region string, controlDialer N.Dialer) ([][]*EdgeAddr, error) {
 	regions, err := lookupEdgeSRV(region)
 	if err != nil {
-		regions, err = lookupEdgeSRVWithDoT(ctx, region)
+		regions, err = lookupEdgeSRVWithDoT(ctx, region, controlDialer)
 		if err != nil {
 			return nil, E.Cause(err, "edge discovery")
 		}
@@ -59,12 +61,11 @@ func lookupEdgeSRV(region string) ([][]*EdgeAddr, error) {
 	return resolveSRVRecords(addrs)
 }
 
-func lookupEdgeSRVWithDoT(ctx context.Context, region string) ([][]*EdgeAddr, error) {
+func lookupEdgeSRVWithDoT(ctx context.Context, region string, controlDialer N.Dialer) ([][]*EdgeAddr, error) {
 	resolver := &net.Resolver{
 		PreferGo: true,
 		Dial: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			var dialer net.Dialer
-			conn, err := dialer.DialContext(ctx, "tcp", dotServerAddr)
+			conn, err := controlDialer.DialContext(ctx, "tcp", M.ParseSocksaddr(dotServerAddr))
 			if err != nil {
 				return nil, err
 			}

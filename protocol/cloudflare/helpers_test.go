@@ -192,6 +192,8 @@ func newTestInbound(t *testing.T, token string, protocol string, haConnections i
 		configManager:    configManager,
 		datagramV2Muxers: make(map[DatagramSender]*DatagramV2Muxer),
 		datagramV3Muxers: make(map[DatagramSender]*DatagramV3Muxer),
+		controlDialer:    N.SystemDialer,
+		accessCache:      &accessValidatorCache{values: make(map[string]accessValidator), dialer: N.SystemDialer},
 	}
 
 	t.Cleanup(func() {

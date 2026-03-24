@@ -6,10 +6,12 @@ import (
 	"context"
 	"net"
 	"testing"
+
+	N "github.com/sagernet/sing/common/network"
 )
 
 func TestDiscoverEdge(t *testing.T) {
-	regions, err := DiscoverEdge(context.Background(), "")
+	regions, err := DiscoverEdge(context.Background(), "", N.SystemDialer)
 	if err != nil {
 		t.Fatal("DiscoverEdge: ", err)
 	}
