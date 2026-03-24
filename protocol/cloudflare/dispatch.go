@@ -23,7 +23,6 @@ import (
 	E "github.com/sagernet/sing/common/exceptions"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
-	"github.com/sagernet/sing/common/pipe"
 )
 
 const (
@@ -196,14 +195,22 @@ func (i *Inbound) handleTCPStream(ctx context.Context, stream io.ReadWriteCloser
 	}
 	defer i.flowLimiter.Release(limit)
 
-	targetConn, err := i.dialWarpTCP(ctx, metadata.Destination)
+	warpRouting := i.configManager.Snapshot().WarpRouting
+	targetConn, cleanup, err := i.dialRouterTCPWithMetadata(ctx, metadata, routedPipeTCPOptions{
+		timeout: warpRouting.ConnectTimeout,
+		onHandshake: func(conn net.Conn) {
+			_ = applyTCPKeepAlive(conn, warpRouting.TCPKeepAlive)
+		},
+	})
 	if err != nil {
 		i.logger.ErrorContext(ctx, "dial tcp origin: ", err)
 		respWriter.WriteResponse(err, nil)
 		return
 	}
-	defer targetConn.Close()
+	defer cleanup()
 
+	// Cloudflare expects an optimistic ACK here so the routed TCP path can sniff
+	// the real input stream before the outbound connection is fully established.
 	err = respWriter.WriteResponse(nil, nil)
 	if err != nil {
 		i.logger.ErrorContext(ctx, "write connect response: ", err)
@@ -391,12 +398,7 @@ func (i *Inbound) roundTripHTTP(ctx context.Context, stream io.ReadWriteCloser, 
 }
 
 func (i *Inbound) newRouterOriginTransport(ctx context.Context, metadata adapter.InboundContext, originRequest OriginRequestConfig, requestHost string) (*http.Transport, func()) {
-	input, output := pipe.Pipe()
-	done := make(chan struct{})
-	go i.router.RouteConnectionEx(ctx, output, metadata, N.OnceClose(func(it error) {
-		common.Close(input, output)
-		close(done)
-	}))
+	input, cleanup, _ := i.dialRouterTCPWithMetadata(ctx, metadata, routedPipeTCPOptions{})
 
 	transport := &http.Transport{
 		DisableCompression:  true,
@@ -411,13 +413,7 @@ func (i *Inbound) newRouterOriginTransport(ctx context.Context, metadata adapter
 		},
 	}
 	applyHTTPTransportProxy(transport, originRequest)
-	return transport, func() {
-		common.Close(input, output)
-		select {
-		case <-done:
-		case <-time.After(time.Second):
-		}
-	}
+	return transport, cleanup
 }
 
 func (i *Inbound) newDirectOriginTransport(service ResolvedService, requestHost string) (*http.Transport, func(), error) {

@@ -6,7 +6,6 @@ import (
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/common/dialer"
-	tf "github.com/sagernet/sing-box/common/tlsfragment"
 	C "github.com/sagernet/sing-box/constant"
 	R "github.com/sagernet/sing-box/route/rule"
 	"github.com/sagernet/sing/common"
@@ -15,45 +14,6 @@ import (
 	E "github.com/sagernet/sing/common/exceptions"
 	N "github.com/sagernet/sing/common/network"
 )
-
-// DialRouteConnection dials a routed TCP connection for metadata without requiring an upstream accepted socket.
-func (r *Router) DialRouteConnection(ctx context.Context, metadata adapter.InboundContext) (net.Conn, error) {
-	metadata.Network = N.NetworkTCP
-	ctx = adapter.WithContext(ctx, &metadata)
-
-	selectedRule, selectedOutbound, err := r.selectRoutedOutbound(ctx, &metadata, N.NetworkTCP)
-	if err != nil {
-		return nil, err
-	}
-
-	var conn net.Conn
-	if len(metadata.DestinationAddresses) > 0 || metadata.Destination.IsIP() {
-		conn, err = dialer.DialSerialNetwork(
-			ctx,
-			selectedOutbound,
-			N.NetworkTCP,
-			metadata.Destination,
-			metadata.DestinationAddresses,
-			metadata.NetworkStrategy,
-			metadata.NetworkType,
-			metadata.FallbackNetworkType,
-			metadata.FallbackDelay,
-		)
-	} else {
-		conn, err = selectedOutbound.DialContext(ctx, N.NetworkTCP, metadata.Destination)
-	}
-	if err != nil {
-		return nil, err
-	}
-
-	if metadata.TLSFragment || metadata.TLSRecordFragment {
-		conn = tf.NewConn(conn, ctx, metadata.TLSFragment, metadata.TLSRecordFragment, metadata.TLSFragmentFallbackDelay)
-	}
-	for _, tracker := range r.trackers {
-		conn = tracker.RoutedConnection(ctx, conn, metadata, selectedRule, selectedOutbound)
-	}
-	return conn, nil
-}
 
 // DialRoutePacketConnection dials a routed connected UDP packet connection for metadata.
 func (r *Router) DialRoutePacketConnection(ctx context.Context, metadata adapter.InboundContext) (N.PacketConn, error) {

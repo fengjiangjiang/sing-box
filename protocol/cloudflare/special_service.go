@@ -13,16 +13,13 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/transport/v2raywebsocket"
-	"github.com/sagernet/sing/common"
 	"github.com/sagernet/sing/common/bufio"
 	E "github.com/sagernet/sing/common/exceptions"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
-	"github.com/sagernet/sing/common/pipe"
 	"github.com/sagernet/ws"
 )
 
@@ -118,25 +115,13 @@ func requestHeaderValue(request *ConnectRequest, headerName string) string {
 }
 
 func (i *Inbound) dialRouterTCP(ctx context.Context, destination M.Socksaddr) (net.Conn, func(), error) {
-	input, output := pipe.Pipe()
-	done := make(chan struct{})
 	metadata := adapter.InboundContext{
 		Inbound:     i.Tag(),
 		InboundType: i.Type(),
 		Network:     N.NetworkTCP,
 		Destination: destination,
 	}
-	go i.router.RouteConnectionEx(ctx, output, metadata, N.OnceClose(func(it error) {
-		common.Close(input, output)
-		close(done)
-	}))
-	return input, func() {
-		common.Close(input, output)
-		select {
-		case <-done:
-		case <-time.After(time.Second):
-		}
-	}, nil
+	return i.dialRouterTCPWithMetadata(ctx, metadata, routedPipeTCPOptions{})
 }
 
 func (i *Inbound) serveSocksProxy(ctx context.Context, conn net.Conn, policy *ipRulePolicy) error {

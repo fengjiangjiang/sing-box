@@ -138,10 +138,6 @@ func (r *testRouter) RoutePacketConnectionEx(ctx context.Context, conn N.PacketC
 	onClose(nil)
 }
 
-func (r *testRouter) DialRouteConnection(ctx context.Context, metadata adapter.InboundContext) (net.Conn, error) {
-	return net.Dial("tcp", metadata.Destination.String())
-}
-
 func (r *testRouter) DialRoutePacketConnection(ctx context.Context, metadata adapter.InboundContext) (N.PacketConn, error) {
 	conn, err := net.Dial("udp", metadata.Destination.String())
 	if err != nil {

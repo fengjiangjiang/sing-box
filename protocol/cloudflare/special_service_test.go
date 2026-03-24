@@ -68,6 +68,7 @@ func newSpecialServiceInboundWithRouter(t *testing.T, router adapter.Router) *In
 		router:        router,
 		logger:        logFactory.NewLogger("test"),
 		configManager: configManager,
+		flowLimiter:   &FlowLimiter{},
 	}
 }
 
