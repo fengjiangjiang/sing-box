@@ -5,9 +5,11 @@ package cloudflare
 import (
 	"context"
 	"io"
+	"net"
 	"runtime"
 	"time"
 
+	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/protocol/cloudflare/tunnelrpc"
 	E "github.com/sagernet/sing/common/exceptions"
 
@@ -18,8 +20,9 @@ import (
 
 const (
 	registrationTimeout = 10 * time.Second
-	clientVersion       = "sing-box"
 )
+
+var clientVersion = "sing-box " + C.Version
 
 // RegistrationClient handles the Cap'n Proto RPC for tunnel registration.
 type RegistrationClient struct {
@@ -148,14 +151,15 @@ func (c *RegistrationClient) Close() error {
 }
 
 // BuildConnectionOptions creates the ConnectionOptions to send during registration.
-func BuildConnectionOptions(connectorID uuid.UUID, features []string, numPreviousAttempts uint8) *RegistrationConnectionOptions {
+func BuildConnectionOptions(connectorID uuid.UUID, features []string, numPreviousAttempts uint8, originLocalIP net.IP) *RegistrationConnectionOptions {
 	return &RegistrationConnectionOptions{
 		Client: RegistrationClientInfo{
 			ClientID: connectorID[:],
 			Features: features,
 			Version:  clientVersion,
-			Arch:     runtime.GOARCH,
+			Arch:     runtime.GOOS + "_" + runtime.GOARCH,
 		},
+		OriginLocalIP:       originLocalIP,
 		NumPreviousAttempts: numPreviousAttempts,
 	}
 }

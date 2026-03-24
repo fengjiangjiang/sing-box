@@ -40,8 +40,9 @@ type HTTP2Connection struct {
 	gracePeriod time.Duration
 	inbound     *Inbound
 
-	registrationClient *RegistrationClient
-	registrationResult *RegistrationResult
+	numPreviousAttempts uint8
+	registrationClient  *RegistrationClient
+	registrationResult  *RegistrationResult
 
 	activeRequests sync.WaitGroup
 	closeOnce      sync.Once
@@ -55,6 +56,7 @@ func NewHTTP2Connection(
 	credentials Credentials,
 	connectorID uuid.UUID,
 	features []string,
+	numPreviousAttempts uint8,
 	gracePeriod time.Duration,
 	inbound *Inbound,
 	logger log.ContextLogger,
@@ -92,10 +94,11 @@ func NewHTTP2Connection(
 		edgeAddr:    edgeAddr,
 		connIndex:   connIndex,
 		credentials: credentials,
-		connectorID: connectorID,
-		features:    features,
-		gracePeriod: gracePeriod,
-		inbound:     inbound,
+		connectorID:         connectorID,
+		features:            features,
+		numPreviousAttempts: numPreviousAttempts,
+		gracePeriod:         gracePeriod,
+		inbound:             inbound,
 	}, nil
 }
 
@@ -149,7 +152,9 @@ func (c *HTTP2Connection) handleControlStream(ctx context.Context, r *http.Reque
 
 	c.registrationClient = NewRegistrationClient(ctx, stream)
 
-	options := BuildConnectionOptions(c.connectorID, c.features, 0)
+	host, _, _ := net.SplitHostPort(c.conn.LocalAddr().String())
+	originLocalIP := net.ParseIP(host)
+	options := BuildConnectionOptions(c.connectorID, c.features, c.numPreviousAttempts, originLocalIP)
 	result, err := c.registrationClient.RegisterConnection(
 		ctx, c.credentials.Auth(), c.credentials.TunnelID, c.connIndex, options,
 	)

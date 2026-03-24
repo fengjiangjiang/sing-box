@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/tls"
 	"io"
+	"net"
 	"sync"
 	"time"
 
@@ -25,18 +26,27 @@ const (
 	quicKeepAlivePeriod      = 1 * time.Second
 )
 
+func quicInitialPacketSize(ipVersion int) uint16 {
+	initialPacketSize := uint16(1252)
+	if ipVersion == 4 {
+		initialPacketSize = 1232
+	}
+	return initialPacketSize
+}
+
 // QUICConnection manages a single QUIC connection to the Cloudflare edge.
 type QUICConnection struct {
-	conn               *quic.Conn
-	logger             log.ContextLogger
-	edgeAddr           *EdgeAddr
-	connIndex          uint8
-	credentials        Credentials
-	connectorID        uuid.UUID
-	features           []string
-	gracePeriod        time.Duration
-	registrationClient *RegistrationClient
-	registrationResult *RegistrationResult
+	conn                *quic.Conn
+	logger              log.ContextLogger
+	edgeAddr            *EdgeAddr
+	connIndex           uint8
+	credentials         Credentials
+	connectorID         uuid.UUID
+	features            []string
+	numPreviousAttempts uint8
+	gracePeriod         time.Duration
+	registrationClient  *RegistrationClient
+	registrationResult  *RegistrationResult
 
 	closeOnce sync.Once
 }
@@ -49,6 +59,7 @@ func NewQUICConnection(
 	credentials Credentials,
 	connectorID uuid.UUID,
 	features []string,
+	numPreviousAttempts uint8,
 	gracePeriod time.Duration,
 	logger log.ContextLogger,
 ) (*QUICConnection, error) {
@@ -65,10 +76,13 @@ func NewQUICConnection(
 	}
 
 	quicConfig := &quic.Config{
-		HandshakeIdleTimeout: quicHandshakeIdleTimeout,
-		MaxIdleTimeout:       quicMaxIdleTimeout,
-		KeepAlivePeriod:      quicKeepAlivePeriod,
-		EnableDatagrams:      true,
+		HandshakeIdleTimeout:  quicHandshakeIdleTimeout,
+		MaxIdleTimeout:        quicMaxIdleTimeout,
+		KeepAlivePeriod:       quicKeepAlivePeriod,
+		MaxIncomingStreams:    1 << 60,
+		MaxIncomingUniStreams: 1 << 60,
+		EnableDatagrams:       true,
+		InitialPacketSize:     quicInitialPacketSize(edgeAddr.IPVersion),
 	}
 
 	conn, err := quic.DialAddr(ctx, edgeAddr.UDP.String(), tlsConfig, quicConfig)
@@ -77,14 +91,15 @@ func NewQUICConnection(
 	}
 
 	return &QUICConnection{
-		conn:        conn,
-		logger:      logger,
-		edgeAddr:    edgeAddr,
-		connIndex:   connIndex,
-		credentials: credentials,
-		connectorID: connectorID,
-		features:    features,
-		gracePeriod: gracePeriod,
+		conn:                conn,
+		logger:              logger,
+		edgeAddr:            edgeAddr,
+		connIndex:           connIndex,
+		credentials:         credentials,
+		connectorID:         connectorID,
+		features:            features,
+		numPreviousAttempts: numPreviousAttempts,
+		gracePeriod:         gracePeriod,
 	}, nil
 }
 
@@ -128,7 +143,9 @@ func (q *QUICConnection) Serve(ctx context.Context, handler StreamHandler) error
 func (q *QUICConnection) register(ctx context.Context, stream *quic.Stream) error {
 	q.registrationClient = NewRegistrationClient(ctx, newStreamReadWriteCloser(stream))
 
-	options := BuildConnectionOptions(q.connectorID, q.features, 0)
+	host, _, _ := net.SplitHostPort(q.conn.LocalAddr().String())
+	originLocalIP := net.ParseIP(host)
+	options := BuildConnectionOptions(q.connectorID, q.features, q.numPreviousAttempts, originLocalIP)
 	result, err := q.registrationClient.RegisterConnection(
 		ctx, q.credentials.Auth(), q.credentials.TunnelID, q.connIndex, options,
 	)

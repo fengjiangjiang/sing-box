@@ -267,7 +267,7 @@ func (i *Inbound) superviseConnection(connIndex uint8, edgeAddrs []*EdgeAddr, fe
 		}
 
 		edgeAddr := edgeAddrs[rand.Intn(len(edgeAddrs))]
-		err := i.serveConnection(connIndex, edgeAddr, features)
+		err := i.serveConnection(connIndex, edgeAddr, features, uint8(retries))
 		if err == nil || i.ctx.Err() != nil {
 			return
 		}
@@ -284,7 +284,7 @@ func (i *Inbound) superviseConnection(connIndex uint8, edgeAddrs []*EdgeAddr, fe
 	}
 }
 
-func (i *Inbound) serveConnection(connIndex uint8, edgeAddr *EdgeAddr, features []string) error {
+func (i *Inbound) serveConnection(connIndex uint8, edgeAddr *EdgeAddr, features []string, numPreviousAttempts uint8) error {
 	protocol := i.protocol
 	if protocol == "" {
 		protocol = "quic"
@@ -292,21 +292,21 @@ func (i *Inbound) serveConnection(connIndex uint8, edgeAddr *EdgeAddr, features 
 
 	switch protocol {
 	case "quic":
-		return i.serveQUIC(connIndex, edgeAddr, features)
+		return i.serveQUIC(connIndex, edgeAddr, features, numPreviousAttempts)
 	case "http2":
-		return i.serveHTTP2(connIndex, edgeAddr, features)
+		return i.serveHTTP2(connIndex, edgeAddr, features, numPreviousAttempts)
 	default:
 		return E.New("unsupported protocol: ", protocol)
 	}
 }
 
-func (i *Inbound) serveQUIC(connIndex uint8, edgeAddr *EdgeAddr, features []string) error {
+func (i *Inbound) serveQUIC(connIndex uint8, edgeAddr *EdgeAddr, features []string, numPreviousAttempts uint8) error {
 	i.logger.Info("connecting to edge via QUIC (connection ", connIndex, ")")
 
 	connection, err := NewQUICConnection(
 		i.ctx, edgeAddr, connIndex,
 		i.credentials, i.connectorID,
-		features, i.gracePeriod, i.logger,
+		features, numPreviousAttempts, i.gracePeriod, i.logger,
 	)
 	if err != nil {
 		return E.Cause(err, "create QUIC connection")
@@ -321,13 +321,13 @@ func (i *Inbound) serveQUIC(connIndex uint8, edgeAddr *EdgeAddr, features []stri
 	return connection.Serve(i.ctx, i)
 }
 
-func (i *Inbound) serveHTTP2(connIndex uint8, edgeAddr *EdgeAddr, features []string) error {
+func (i *Inbound) serveHTTP2(connIndex uint8, edgeAddr *EdgeAddr, features []string, numPreviousAttempts uint8) error {
 	i.logger.Info("connecting to edge via HTTP/2 (connection ", connIndex, ")")
 
 	connection, err := NewHTTP2Connection(
 		i.ctx, edgeAddr, connIndex,
 		i.credentials, i.connectorID,
-		features, i.gracePeriod, i, i.logger,
+		features, numPreviousAttempts, i.gracePeriod, i, i.logger,
 	)
 	if err != nil {
 		return E.Cause(err, "create HTTP/2 connection")
