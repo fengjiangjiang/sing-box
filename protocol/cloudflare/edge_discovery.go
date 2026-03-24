@@ -21,6 +21,13 @@ const (
 	dotTimeout    = 15 * time.Second
 )
 
+func getRegionalServiceName(region string) string {
+	if region == "" {
+		return edgeSRVService
+	}
+	return region + "-" + edgeSRVService
+}
+
 // EdgeAddr represents a Cloudflare edge server address.
 type EdgeAddr struct {
 	TCP       *net.TCPAddr
@@ -30,10 +37,10 @@ type EdgeAddr struct {
 
 // DiscoverEdge performs SRV-based edge discovery and returns addresses
 // partitioned into regions (typically 2).
-func DiscoverEdge(ctx context.Context) ([][]*EdgeAddr, error) {
-	regions, err := lookupEdgeSRV()
+func DiscoverEdge(ctx context.Context, region string) ([][]*EdgeAddr, error) {
+	regions, err := lookupEdgeSRV(region)
 	if err != nil {
-		regions, err = lookupEdgeSRVWithDoT(ctx)
+		regions, err = lookupEdgeSRVWithDoT(ctx, region)
 		if err != nil {
 			return nil, E.Cause(err, "edge discovery")
 		}
@@ -44,15 +51,15 @@ func DiscoverEdge(ctx context.Context) ([][]*EdgeAddr, error) {
 	return regions, nil
 }
 
-func lookupEdgeSRV() ([][]*EdgeAddr, error) {
-	_, addrs, err := net.LookupSRV(edgeSRVService, edgeSRVProto, edgeSRVName)
+func lookupEdgeSRV(region string) ([][]*EdgeAddr, error) {
+	_, addrs, err := net.LookupSRV(getRegionalServiceName(region), edgeSRVProto, edgeSRVName)
 	if err != nil {
 		return nil, err
 	}
 	return resolveSRVRecords(addrs)
 }
 
-func lookupEdgeSRVWithDoT(ctx context.Context) ([][]*EdgeAddr, error) {
+func lookupEdgeSRVWithDoT(ctx context.Context, region string) ([][]*EdgeAddr, error) {
 	resolver := &net.Resolver{
 		PreferGo: true,
 		Dial: func(ctx context.Context, _, _ string) (net.Conn, error) {
@@ -66,7 +73,7 @@ func lookupEdgeSRVWithDoT(ctx context.Context) ([][]*EdgeAddr, error) {
 	}
 	lookupCtx, cancel := context.WithTimeout(ctx, dotTimeout)
 	defer cancel()
-	_, addrs, err := resolver.LookupSRV(lookupCtx, edgeSRVService, edgeSRVProto, edgeSRVName)
+	_, addrs, err := resolver.LookupSRV(lookupCtx, getRegionalServiceName(region), edgeSRVProto, edgeSRVName)
 	if err != nil {
 		return nil, err
 	}

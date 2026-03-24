@@ -94,6 +94,14 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 		return nil, E.Cause(err, "build cloudflare tunnel runtime config")
 	}
 
+	region := options.Region
+	if region != "" && credentials.Endpoint != "" {
+		return nil, E.New("region cannot be specified when credentials already include an endpoint")
+	}
+	if region == "" {
+		region = credentials.Endpoint
+	}
+
 	inboundCtx, cancel := context.WithCancel(ctx)
 
 	return &Inbound{
@@ -106,7 +114,7 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 		connectorID:      uuid.New(),
 		haConnections:    haConnections,
 		protocol:         protocol,
-		region:           options.Region,
+		region:           region,
 		edgeIPVersion:    edgeIPVersion,
 		datagramVersion:  datagramVersion,
 		gracePeriod:      gracePeriod,
@@ -123,7 +131,7 @@ func (i *Inbound) Start(stage adapter.StartStage) error {
 
 	i.logger.Info("starting Cloudflare Tunnel with ", i.haConnections, " HA connections")
 
-	regions, err := DiscoverEdge(i.ctx)
+	regions, err := DiscoverEdge(i.ctx, i.region)
 	if err != nil {
 		return E.Cause(err, "discover edge")
 	}

@@ -9,7 +9,7 @@ import (
 )
 
 func TestDiscoverEdge(t *testing.T) {
-	regions, err := DiscoverEdge(context.Background())
+	regions, err := DiscoverEdge(context.Background(), "")
 	if err != nil {
 		t.Fatal("DiscoverEdge: ", err)
 	}
@@ -85,4 +85,13 @@ func TestFilterByIPVersion(t *testing.T) {
 			t.Error("expected empty result for nil input")
 		}
 	})
+}
+
+func TestGetRegionalServiceName(t *testing.T) {
+	if got := getRegionalServiceName(""); got != edgeSRVService {
+		t.Fatalf("expected global service %s, got %s", edgeSRVService, got)
+	}
+	if got := getRegionalServiceName("us"); got != "us-"+edgeSRVService {
+		t.Fatalf("expected regional service us-%s, got %s", edgeSRVService, got)
+	}
 }
