@@ -28,6 +28,13 @@ import (
 
 var wsAcceptGUID = []byte("258EAFA5-E914-47DA-95CA-C5AB0DC85B11")
 
+const (
+	socksReplySuccess             = 0
+	socksReplyRuleFailure         = 2
+	socksReplyHostUnreachable     = 4
+	socksReplyCommandNotSupported = 7
+)
+
 func (i *Inbound) handleBastionStream(ctx context.Context, stream io.ReadWriteCloser, respWriter ConnectResponseWriter, request *ConnectRequest, metadata adapter.InboundContext) {
 	destination, err := resolveBastionDestination(request)
 	if err != nil {
@@ -60,7 +67,7 @@ func (i *Inbound) handleRouterBackedStream(ctx context.Context, stream io.ReadWr
 	_ = bufio.CopyConn(ctx, wsConn, targetConn)
 }
 
-func (i *Inbound) handleSocksProxyStream(ctx context.Context, stream io.ReadWriteCloser, respWriter ConnectResponseWriter, request *ConnectRequest, metadata adapter.InboundContext) {
+func (i *Inbound) handleSocksProxyStream(ctx context.Context, stream io.ReadWriteCloser, respWriter ConnectResponseWriter, request *ConnectRequest, metadata adapter.InboundContext, service ResolvedService) {
 	err := respWriter.WriteResponse(nil, encodeResponseHeaders(http.StatusSwitchingProtocols, websocketResponseHeaders(request)))
 	if err != nil {
 		i.logger.ErrorContext(ctx, "write socks-proxy websocket response: ", err)
@@ -69,7 +76,7 @@ func (i *Inbound) handleSocksProxyStream(ctx context.Context, stream io.ReadWrit
 
 	wsConn := v2raywebsocket.NewConn(newStreamConn(stream), nil, ws.StateServerSide)
 	defer wsConn.Close()
-	if err := i.serveSocksProxy(ctx, wsConn); err != nil && !E.IsClosedOrCanceled(err) {
+	if err := i.serveSocksProxy(ctx, wsConn, service.SocksPolicy); err != nil && !E.IsClosedOrCanceled(err) {
 		i.logger.DebugContext(ctx, "socks-proxy stream closed: ", err)
 	}
 }
@@ -132,7 +139,7 @@ func (i *Inbound) dialRouterTCP(ctx context.Context, destination M.Socksaddr) (n
 	}, nil
 }
 
-func (i *Inbound) serveSocksProxy(ctx context.Context, conn net.Conn) error {
+func (i *Inbound) serveSocksProxy(ctx context.Context, conn net.Conn, policy *ipRulePolicy) error {
 	version := make([]byte, 1)
 	if _, err := io.ReadFull(conn, version); err != nil {
 		return err
@@ -161,7 +168,7 @@ func (i *Inbound) serveSocksProxy(ctx context.Context, conn net.Conn) error {
 		return E.New("unsupported SOCKS request version: ", requestHeader[0])
 	}
 	if requestHeader[1] != 1 {
-		_, _ = conn.Write([]byte{5, 7, 0, 1, 0, 0, 0, 0, 0, 0})
+		_ = writeSocksReply(conn, socksReplyCommandNotSupported)
 		return E.New("unsupported SOCKS command: ", requestHeader[1])
 	}
 
@@ -169,17 +176,31 @@ func (i *Inbound) serveSocksProxy(ctx context.Context, conn net.Conn) error {
 	if err != nil {
 		return err
 	}
+	allowed, err := policy.Allow(ctx, destination)
+	if err != nil {
+		_ = writeSocksReply(conn, socksReplyRuleFailure)
+		return err
+	}
+	if !allowed {
+		_ = writeSocksReply(conn, socksReplyRuleFailure)
+		return E.New("connect to ", destination, " denied by ip_rules")
+	}
 	targetConn, cleanup, err := i.dialRouterTCP(ctx, destination)
 	if err != nil {
-		_, _ = conn.Write([]byte{5, 4, 0, 1, 0, 0, 0, 0, 0, 0})
+		_ = writeSocksReply(conn, socksReplyHostUnreachable)
 		return err
 	}
 	defer cleanup()
 
-	if _, err := conn.Write([]byte{5, 0, 0, 1, 0, 0, 0, 0, 0, 0}); err != nil {
+	if err := writeSocksReply(conn, socksReplySuccess); err != nil {
 		return err
 	}
 	return bufio.CopyConn(ctx, conn, targetConn)
+}
+
+func writeSocksReply(conn net.Conn, reply byte) error {
+	_, err := conn.Write([]byte{5, reply, 0, 1, 0, 0, 0, 0, 0, 0})
+	return err
 }
 
 func readSocksDestination(conn net.Conn, addressType byte) (M.Socksaddr, error) {

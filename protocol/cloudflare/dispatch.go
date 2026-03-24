@@ -272,7 +272,7 @@ func (i *Inbound) handleHTTPService(ctx context.Context, stream io.ReadWriteClos
 			respWriter.WriteResponse(err, nil)
 			return
 		}
-		i.handleSocksProxyStream(ctx, stream, respWriter, request, metadata)
+		i.handleSocksProxyStream(ctx, stream, respWriter, request, metadata, service)
 	default:
 		err := E.New("unsupported service kind for HTTP/WebSocket request")
 		i.logger.ErrorContext(ctx, err)

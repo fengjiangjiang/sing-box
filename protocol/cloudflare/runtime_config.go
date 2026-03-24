@@ -50,6 +50,7 @@ type ResolvedService struct {
 	BaseURL       *url.URL
 	UnixPath      string
 	StatusCode    int
+	SocksPolicy   *ipRulePolicy
 	OriginRequest OriginRequestConfig
 }
 
@@ -432,9 +433,14 @@ func parseResolvedService(rawService string, originRequest OriginRequestConfig) 
 			OriginRequest: originRequest,
 		}, nil
 	case rawService == "socks-proxy":
+		policy, err := newIPRulePolicy(originRequest.IPRules)
+		if err != nil {
+			return ResolvedService{}, E.Cause(err, "compile socks-proxy ip rules")
+		}
 		return ResolvedService{
 			Kind:          ResolvedServiceSocksProxy,
 			Service:       rawService,
+			SocksPolicy:   policy,
 			OriginRequest: originRequest,
 		}, nil
 	case strings.HasPrefix(rawService, "unix:"):
