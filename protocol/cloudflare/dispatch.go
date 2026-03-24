@@ -214,6 +214,14 @@ func (i *Inbound) handleHTTPService(ctx context.Context, stream io.ReadWriteClos
 		} else {
 			i.handleWebSocketStream(ctx, stream, respWriter, request, metadata, service)
 		}
+	case ResolvedServiceStream:
+		if request.Type != ConnectionTypeWebsocket {
+			err := E.New("stream service requires websocket request type")
+			i.logger.ErrorContext(ctx, err)
+			respWriter.WriteResponse(err, nil)
+			return
+		}
+		i.handleStreamService(ctx, stream, respWriter, request, metadata, service.Destination)
 	case ResolvedServiceUnix, ResolvedServiceUnixTLS, ResolvedServiceHelloWorld:
 		if request.Type == ConnectionTypeHTTP {
 			i.handleDirectHTTPStream(ctx, stream, respWriter, request, metadata, service)

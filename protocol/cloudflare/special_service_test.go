@@ -16,6 +16,7 @@ import (
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
+	M "github.com/sagernet/sing/common/metadata"
 	"github.com/sagernet/ws"
 	"github.com/sagernet/ws/wsutil"
 )
@@ -231,5 +232,76 @@ func TestHandleSocksProxyStream(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("socks-proxy stream did not exit")
+	}
+}
+
+func TestHandleStreamService(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			go func(conn net.Conn) {
+				defer conn.Close()
+				_, _ = io.Copy(conn, conn)
+			}(conn)
+		}
+	}()
+
+	serverSide, clientSide := net.Pipe()
+	defer clientSide.Close()
+
+	inboundInstance := newSpecialServiceInbound(t)
+	request := &ConnectRequest{
+		Type: ConnectionTypeWebsocket,
+		Metadata: []Metadata{
+			{Key: metadataHTTPHeader + ":Sec-WebSocket-Key", Val: "dGhlIHNhbXBsZSBub25jZQ=="},
+		},
+	}
+	respWriter := &fakeConnectResponseWriter{done: make(chan struct{})}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		inboundInstance.handleStreamService(context.Background(), serverSide, respWriter, request, adapter.InboundContext{}, M.ParseSocksaddr(listener.Addr().String()))
+	}()
+
+	select {
+	case <-respWriter.done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for stream service connect response")
+	}
+	if respWriter.err != nil {
+		t.Fatal(respWriter.err)
+	}
+	if respWriter.status != http.StatusSwitchingProtocols {
+		t.Fatalf("expected 101 response, got %d", respWriter.status)
+	}
+
+	if err := wsutil.WriteClientMessage(clientSide, ws.OpBinary, []byte("hello")); err != nil {
+		t.Fatal(err)
+	}
+	data, opCode, err := wsutil.ReadServerData(clientSide)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opCode != ws.OpBinary {
+		t.Fatalf("expected binary frame, got %v", opCode)
+	}
+	if string(data) != "hello" {
+		t.Fatalf("expected echoed payload, got %q", string(data))
+	}
+	_ = clientSide.Close()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("stream service did not exit")
 	}
 }

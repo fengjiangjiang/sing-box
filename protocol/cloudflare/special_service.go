@@ -34,8 +34,15 @@ func (i *Inbound) handleBastionStream(ctx context.Context, stream io.ReadWriteCl
 		respWriter.WriteResponse(err, nil)
 		return
 	}
+	i.handleRouterBackedStream(ctx, stream, respWriter, request, M.ParseSocksaddr(destination))
+}
 
-	targetConn, cleanup, err := i.dialRouterTCP(ctx, M.ParseSocksaddr(destination))
+func (i *Inbound) handleStreamService(ctx context.Context, stream io.ReadWriteCloser, respWriter ConnectResponseWriter, request *ConnectRequest, metadata adapter.InboundContext, destination M.Socksaddr) {
+	i.handleRouterBackedStream(ctx, stream, respWriter, request, destination)
+}
+
+func (i *Inbound) handleRouterBackedStream(ctx context.Context, stream io.ReadWriteCloser, respWriter ConnectResponseWriter, request *ConnectRequest, destination M.Socksaddr) {
+	targetConn, cleanup, err := i.dialRouterTCP(ctx, destination)
 	if err != nil {
 		respWriter.WriteResponse(err, nil)
 		return
