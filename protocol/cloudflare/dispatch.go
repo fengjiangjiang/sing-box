@@ -393,6 +393,7 @@ func (i *Inbound) newRouterOriginTransport(ctx context.Context, metadata adapter
 			return input, nil
 		},
 	}
+	applyHTTPTransportProxy(transport, originRequest)
 	return transport, func() {
 		common.Close(input, output)
 		select {
@@ -403,6 +404,13 @@ func (i *Inbound) newRouterOriginTransport(ctx context.Context, metadata adapter
 }
 
 func (i *Inbound) newDirectOriginTransport(service ResolvedService, requestHost string) (*http.Transport, func(), error) {
+	dialer := &net.Dialer{
+		Timeout:   service.OriginRequest.ConnectTimeout,
+		KeepAlive: service.OriginRequest.TCPKeepAlive,
+	}
+	if service.OriginRequest.NoHappyEyeballs {
+		dialer.FallbackDelay = -1
+	}
 	transport := &http.Transport{
 		DisableCompression:  true,
 		ForceAttemptHTTP2:   service.OriginRequest.HTTP2Origin,
@@ -412,14 +420,13 @@ func (i *Inbound) newDirectOriginTransport(service ResolvedService, requestHost 
 		MaxIdleConnsPerHost: service.OriginRequest.KeepAliveConnections,
 		TLSClientConfig:     buildOriginTLSConfig(service.OriginRequest, requestHost),
 	}
+	applyHTTPTransportProxy(transport, service.OriginRequest)
 	switch service.Kind {
 	case ResolvedServiceUnix, ResolvedServiceUnixTLS:
-		dialer := &net.Dialer{}
 		transport.DialContext = func(ctx context.Context, _, _ string) (net.Conn, error) {
 			return dialer.DialContext(ctx, "unix", service.UnixPath)
 		}
 	case ResolvedServiceHelloWorld:
-		dialer := &net.Dialer{}
 		target := service.BaseURL.Host
 		transport.DialContext = func(ctx context.Context, _, _ string) (net.Conn, error) {
 			return dialer.DialContext(ctx, "tcp", target)
@@ -447,6 +454,20 @@ func buildOriginTLSConfig(originRequest OriginRequestConfig, requestHost string)
 		tlsConfig.RootCAs = pool
 	}
 	return tlsConfig
+}
+
+func applyHTTPTransportProxy(transport *http.Transport, originRequest OriginRequestConfig) {
+	if originRequest.ProxyAddress == "" || originRequest.ProxyPort == 0 {
+		return
+	}
+	switch strings.ToLower(originRequest.ProxyType) {
+	case "", "http":
+		proxyURL := &url.URL{
+			Scheme: "http",
+			Host:   net.JoinHostPort(originRequest.ProxyAddress, strconv.Itoa(int(originRequest.ProxyPort))),
+		}
+		transport.Proxy = http.ProxyURL(proxyURL)
+	}
 }
 
 func originTLSServerName(originRequest OriginRequestConfig, requestHost string) string {
