@@ -142,6 +142,11 @@ func newTestInbound(t *testing.T, token string, protocol string, haConnections i
 		t.Fatal("create logger: ", err)
 	}
 
+	configManager, err := NewConfigManager(option.CloudflareTunnelInboundOptions{})
+	if err != nil {
+		t.Fatal("create config manager: ", err)
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	inboundInstance := &Inbound{
 		Adapter:          inbound.NewAdapter(C.TypeCloudflareTunnel, "test"),
@@ -156,6 +161,7 @@ func newTestInbound(t *testing.T, token string, protocol string, haConnections i
 		edgeIPVersion:    0,
 		datagramVersion:  "",
 		gracePeriod:      5 * time.Second,
+		configManager:    configManager,
 		datagramV2Muxers: make(map[DatagramSender]*DatagramV2Muxer),
 		datagramV3Muxers: make(map[DatagramSender]*DatagramV3Muxer),
 	}

@@ -171,7 +171,6 @@ func DefaultFeatures(datagramVersion string) []string {
 		"support_datagram_v2",
 		"support_quic_eof",
 		"allow_remote_config",
-		"management_logs",
 	}
 	if datagramVersion == "v3" {
 		features = append(features, "support_datagram_v3_2")

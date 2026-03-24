@@ -7,9 +7,10 @@ import (
 	"encoding/base64"
 	"io"
 	"math/rand"
+	"net"
+	"net/http"
 	"net/url"
 	"os"
-	"strings"
 	"sync"
 	"time"
 
@@ -30,17 +31,19 @@ func RegisterInbound(registry *inbound.Registry) {
 
 type Inbound struct {
 	inbound.Adapter
-	ctx               context.Context
-	cancel            context.CancelFunc
-	router            adapter.ConnectionRouterEx
-	logger            log.ContextLogger
-	credentials       Credentials
-	connectorID       uuid.UUID
-	haConnections     int
-	protocol          string
-	edgeIPVersion     int
-	datagramVersion   string
-	gracePeriod time.Duration
+	ctx             context.Context
+	cancel          context.CancelFunc
+	router          adapter.ConnectionRouterEx
+	logger          log.ContextLogger
+	credentials     Credentials
+	connectorID     uuid.UUID
+	haConnections   int
+	protocol        string
+	region          string
+	edgeIPVersion   int
+	datagramVersion string
+	gracePeriod     time.Duration
+	configManager   *ConfigManager
 
 	connectionAccess sync.Mutex
 	connections      []io.Closer
@@ -50,101 +53,9 @@ type Inbound struct {
 	datagramV2Muxers    map[DatagramSender]*DatagramV2Muxer
 	datagramV3Muxers    map[DatagramSender]*DatagramV3Muxer
 
-	ingressAccess  sync.RWMutex
-	ingressVersion int32
-	ingressRules   []IngressRule
-}
-
-// IngressRule maps a hostname pattern to an origin service URL.
-type IngressRule struct {
-	Hostname string
-	Service  string
-}
-
-type ingressConfig struct {
-	Ingress []ingressConfigRule `json:"ingress"`
-}
-
-type ingressConfigRule struct {
-	Hostname string `json:"hostname,omitempty"`
-	Service  string `json:"service"`
-}
-
-// UpdateIngress applies a new ingress configuration from the edge.
-func (i *Inbound) UpdateIngress(version int32, config []byte) {
-	i.ingressAccess.Lock()
-	defer i.ingressAccess.Unlock()
-
-	if version <= i.ingressVersion {
-		return
-	}
-
-	var parsed ingressConfig
-	err := json.Unmarshal(config, &parsed)
-	if err != nil {
-		i.logger.Error("parse ingress config: ", err)
-		return
-	}
-
-	rules := make([]IngressRule, 0, len(parsed.Ingress))
-	for _, rule := range parsed.Ingress {
-		rules = append(rules, IngressRule{
-			Hostname: rule.Hostname,
-			Service:  rule.Service,
-		})
-	}
-	i.ingressRules = rules
-	i.ingressVersion = version
-	i.logger.Info("updated ingress configuration (version ", version, ", ", len(rules), " rules)")
-}
-
-// ResolveOrigin finds the origin service URL for a given hostname.
-// Returns the service URL if matched, or empty string if no match.
-func (i *Inbound) ResolveOrigin(hostname string) string {
-	i.ingressAccess.RLock()
-	defer i.ingressAccess.RUnlock()
-
-	for _, rule := range i.ingressRules {
-		if rule.Hostname == "" {
-			return rule.Service
-		}
-		if matchIngress(rule.Hostname, hostname) {
-			return rule.Service
-		}
-	}
-	return ""
-}
-
-func matchIngress(pattern, hostname string) bool {
-	if pattern == hostname {
-		return true
-	}
-	if strings.HasPrefix(pattern, "*.") {
-		suffix := pattern[1:]
-		return strings.HasSuffix(hostname, suffix)
-	}
-	return false
-}
-
-// ResolveOriginURL rewrites a request URL to point to the origin service.
-// For example, https://testbox.badnet.work/path → http://127.0.0.1:8083/path
-func (i *Inbound) ResolveOriginURL(requestURL string) string {
-	parsed, err := url.Parse(requestURL)
-	if err != nil {
-		return requestURL
-	}
-	hostname := parsed.Hostname()
-	origin := i.ResolveOrigin(hostname)
-	if origin == "" || strings.HasPrefix(origin, "http_status:") {
-		return requestURL
-	}
-	originURL, err := url.Parse(origin)
-	if err != nil {
-		return requestURL
-	}
-	parsed.Scheme = originURL.Scheme
-	parsed.Host = originURL.Host
-	return parsed.String()
+	helloWorldAccess sync.Mutex
+	helloWorldServer *http.Server
+	helloWorldURL    *url.URL
 }
 
 func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.CloudflareTunnelInboundOptions) (adapter.Inbound, error) {
@@ -178,23 +89,30 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 		gracePeriod = 30 * time.Second
 	}
 
+	configManager, err := NewConfigManager(options)
+	if err != nil {
+		return nil, E.Cause(err, "build cloudflare tunnel runtime config")
+	}
+
 	inboundCtx, cancel := context.WithCancel(ctx)
 
 	return &Inbound{
-		Adapter:           inbound.NewAdapter(C.TypeCloudflareTunnel, tag),
-		ctx:               inboundCtx,
-		cancel:            cancel,
-		router:            router,
-		logger:            logger,
-		credentials:       credentials,
-		connectorID:       uuid.New(),
-		haConnections:     haConnections,
-		protocol:          protocol,
-		edgeIPVersion:     edgeIPVersion,
-		datagramVersion:   datagramVersion,
-		gracePeriod: gracePeriod,
-		datagramV2Muxers:  make(map[DatagramSender]*DatagramV2Muxer),
-		datagramV3Muxers:  make(map[DatagramSender]*DatagramV3Muxer),
+		Adapter:          inbound.NewAdapter(C.TypeCloudflareTunnel, tag),
+		ctx:              inboundCtx,
+		cancel:           cancel,
+		router:           router,
+		logger:           logger,
+		credentials:      credentials,
+		connectorID:      uuid.New(),
+		haConnections:    haConnections,
+		protocol:         protocol,
+		region:           options.Region,
+		edgeIPVersion:    edgeIPVersion,
+		datagramVersion:  datagramVersion,
+		gracePeriod:      gracePeriod,
+		configManager:    configManager,
+		datagramV2Muxers: make(map[DatagramSender]*DatagramV2Muxer),
+		datagramV3Muxers: make(map[DatagramSender]*DatagramV3Muxer),
 	}, nil
 }
 
@@ -238,6 +156,16 @@ func (i *Inbound) Start(stage adapter.StartStage) error {
 	return nil
 }
 
+func (i *Inbound) ApplyConfig(version int32, config []byte) ConfigUpdateResult {
+	result := i.configManager.Apply(version, config)
+	if result.Err != nil {
+		i.logger.Error("update ingress configuration: ", result.Err)
+		return result
+	}
+	i.logger.Info("updated ingress configuration (version ", result.LastAppliedVersion, ")")
+	return result
+}
+
 func (i *Inbound) Close() error {
 	i.cancel()
 	i.done.Wait()
@@ -247,7 +175,39 @@ func (i *Inbound) Close() error {
 	}
 	i.connections = nil
 	i.connectionAccess.Unlock()
+	if i.helloWorldServer != nil {
+		i.helloWorldServer.Close()
+	}
 	return nil
+}
+
+func (i *Inbound) ensureHelloWorldURL() (*url.URL, error) {
+	i.helloWorldAccess.Lock()
+	defer i.helloWorldAccess.Unlock()
+	if i.helloWorldURL != nil {
+		return i.helloWorldURL, nil
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		writer.WriteHeader(http.StatusOK)
+		_, _ = writer.Write([]byte("Hello World"))
+	})
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return nil, E.Cause(err, "listen hello world server")
+	}
+	server := &http.Server{Handler: mux}
+	go server.Serve(listener)
+
+	i.helloWorldServer = server
+	i.helloWorldURL = &url.URL{
+		Scheme: "http",
+		Host:   listener.Addr().String(),
+	}
+	return i.helloWorldURL, nil
 }
 
 const (

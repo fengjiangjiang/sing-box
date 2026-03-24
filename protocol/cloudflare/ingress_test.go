@@ -6,143 +6,148 @@ import (
 	"testing"
 
 	"github.com/sagernet/sing-box/log"
+	"github.com/sagernet/sing-box/option"
 )
 
-func newTestIngressInbound() *Inbound {
-	return &Inbound{logger: log.NewNOPFactory().NewLogger("test")}
+func newTestIngressInbound(t *testing.T) *Inbound {
+	t.Helper()
+	configManager, err := NewConfigManager(option.CloudflareTunnelInboundOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &Inbound{
+		logger:        log.NewNOPFactory().NewLogger("test"),
+		configManager: configManager,
+	}
 }
 
-func TestUpdateIngress(t *testing.T) {
-	inboundInstance := newTestIngressInbound()
+func mustResolvedService(t *testing.T, rawService string) ResolvedService {
+	t.Helper()
+	service, err := parseResolvedService(rawService, defaultOriginRequestConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return service
+}
+
+func TestApplyConfig(t *testing.T) {
+	inboundInstance := newTestIngressInbound(t)
 
 	config1 := []byte(`{"ingress":[{"hostname":"a.com","service":"http://localhost:80"},{"hostname":"b.com","service":"http://localhost:81"},{"service":"http_status:404"}]}`)
-	inboundInstance.UpdateIngress(1, config1)
-
-	inboundInstance.ingressAccess.RLock()
-	count := len(inboundInstance.ingressRules)
-	inboundInstance.ingressAccess.RUnlock()
-	if count != 3 {
-		t.Fatalf("expected 3 rules, got %d", count)
+	result := inboundInstance.ApplyConfig(1, config1)
+	if result.Err != nil {
+		t.Fatal(result.Err)
+	}
+	if result.LastAppliedVersion != 1 {
+		t.Fatalf("expected version 1, got %d", result.LastAppliedVersion)
 	}
 
-	inboundInstance.UpdateIngress(1, []byte(`{"ingress":[{"service":"http_status:503"}]}`))
-	inboundInstance.ingressAccess.RLock()
-	count = len(inboundInstance.ingressRules)
-	inboundInstance.ingressAccess.RUnlock()
-	if count != 3 {
-		t.Error("version 1 re-apply should not change rules, got ", count)
+	service, loaded := inboundInstance.configManager.Resolve("a.com", "/")
+	if !loaded || service.Service != "http://localhost:80" {
+		t.Fatalf("expected a.com to resolve to localhost:80, got %#v, loaded=%v", service, loaded)
 	}
 
-	inboundInstance.UpdateIngress(2, []byte(`{"ingress":[{"service":"http_status:503"}]}`))
-	inboundInstance.ingressAccess.RLock()
-	count = len(inboundInstance.ingressRules)
-	inboundInstance.ingressAccess.RUnlock()
-	if count != 1 {
-		t.Error("version 2 should update to 1 rule, got ", count)
+	result = inboundInstance.ApplyConfig(1, []byte(`{"ingress":[{"service":"http_status:503"}]}`))
+	if result.Err != nil {
+		t.Fatal(result.Err)
 	}
-}
-
-func TestUpdateIngressInvalidJSON(t *testing.T) {
-	inboundInstance := newTestIngressInbound()
-	inboundInstance.UpdateIngress(1, []byte("not json"))
-
-	inboundInstance.ingressAccess.RLock()
-	count := len(inboundInstance.ingressRules)
-	inboundInstance.ingressAccess.RUnlock()
-	if count != 0 {
-		t.Error("invalid JSON should leave rules empty, got ", count)
-	}
-}
-
-func TestResolveOriginExact(t *testing.T) {
-	inboundInstance := newTestIngressInbound()
-	inboundInstance.ingressRules = []IngressRule{
-		{Hostname: "test.example.com", Service: "http://localhost:8080"},
-		{Hostname: "", Service: "http_status:404"},
+	if result.LastAppliedVersion != 1 {
+		t.Fatalf("same version should keep current version, got %d", result.LastAppliedVersion)
 	}
 
-	result := inboundInstance.ResolveOrigin("test.example.com")
-	if result != "http://localhost:8080" {
-		t.Error("expected http://localhost:8080, got ", result)
+	service, loaded = inboundInstance.configManager.Resolve("b.com", "/")
+	if !loaded || service.Service != "http://localhost:81" {
+		t.Fatalf("expected old rules to remain, got %#v, loaded=%v", service, loaded)
+	}
+
+	result = inboundInstance.ApplyConfig(2, []byte(`{"ingress":[{"service":"http_status:503"}]}`))
+	if result.Err != nil {
+		t.Fatal(result.Err)
+	}
+	if result.LastAppliedVersion != 2 {
+		t.Fatalf("expected version 2, got %d", result.LastAppliedVersion)
+	}
+
+	service, loaded = inboundInstance.configManager.Resolve("anything.com", "/")
+	if !loaded || service.StatusCode != 503 {
+		t.Fatalf("expected catch-all status 503, got %#v, loaded=%v", service, loaded)
 	}
 }
 
-func TestResolveOriginWildcard(t *testing.T) {
-	inboundInstance := newTestIngressInbound()
-	inboundInstance.ingressRules = []IngressRule{
-		{Hostname: "*.example.com", Service: "http://localhost:9090"},
+func TestApplyConfigInvalidJSON(t *testing.T) {
+	inboundInstance := newTestIngressInbound(t)
+	result := inboundInstance.ApplyConfig(1, []byte("not json"))
+	if result.Err == nil {
+		t.Fatal("expected parse error")
 	}
-
-	result := inboundInstance.ResolveOrigin("sub.example.com")
-	if result != "http://localhost:9090" {
-		t.Error("wildcard should match sub.example.com, got ", result)
-	}
-
-	result = inboundInstance.ResolveOrigin("example.com")
-	if result != "" {
-		t.Error("wildcard should not match bare example.com, got ", result)
+	if result.LastAppliedVersion != -1 {
+		t.Fatalf("expected version to stay -1, got %d", result.LastAppliedVersion)
 	}
 }
 
-func TestResolveOriginCatchAll(t *testing.T) {
-	inboundInstance := newTestIngressInbound()
-	inboundInstance.ingressRules = []IngressRule{
-		{Hostname: "specific.com", Service: "http://localhost:1"},
-		{Hostname: "", Service: "http://localhost:2"},
+func TestResolveExactAndWildcard(t *testing.T) {
+	inboundInstance := newTestIngressInbound(t)
+	inboundInstance.configManager.activeConfig = RuntimeConfig{
+		Ingress: []compiledIngressRule{
+			{Hostname: "test.example.com", Service: mustResolvedService(t, "http://localhost:8080")},
+			{Hostname: "*.example.com", Service: mustResolvedService(t, "http://localhost:9090")},
+			{Service: mustResolvedService(t, "http_status:404")},
+		},
 	}
 
-	result := inboundInstance.ResolveOrigin("anything.com")
-	if result != "http://localhost:2" {
-		t.Error("catch-all should match, got ", result)
-	}
-}
-
-func TestResolveOriginNoMatch(t *testing.T) {
-	inboundInstance := newTestIngressInbound()
-	inboundInstance.ingressRules = []IngressRule{
-		{Hostname: "specific.com", Service: "http://localhost:1"},
+	service, loaded := inboundInstance.configManager.Resolve("test.example.com", "/")
+	if !loaded || service.Service != "http://localhost:8080" {
+		t.Fatalf("expected exact match, got %#v, loaded=%v", service, loaded)
 	}
 
-	result := inboundInstance.ResolveOrigin("other.com")
-	if result != "" {
-		t.Error("expected empty for no match, got ", result)
-	}
-}
-
-func TestResolveOriginURLRewrite(t *testing.T) {
-	inboundInstance := newTestIngressInbound()
-	inboundInstance.ingressRules = []IngressRule{
-		{Hostname: "foo.com", Service: "http://127.0.0.1:8083"},
+	service, loaded = inboundInstance.configManager.Resolve("sub.example.com", "/")
+	if !loaded || service.Service != "http://localhost:9090" {
+		t.Fatalf("expected wildcard match, got %#v, loaded=%v", service, loaded)
 	}
 
-	result := inboundInstance.ResolveOriginURL("https://foo.com/path?q=1")
-	if result != "http://127.0.0.1:8083/path?q=1" {
-		t.Error("expected http://127.0.0.1:8083/path?q=1, got ", result)
+	service, loaded = inboundInstance.configManager.Resolve("unknown.test", "/")
+	if !loaded || service.StatusCode != 404 {
+		t.Fatalf("expected catch-all 404, got %#v, loaded=%v", service, loaded)
 	}
 }
 
-func TestResolveOriginURLNoMatch(t *testing.T) {
-	inboundInstance := newTestIngressInbound()
-	inboundInstance.ingressRules = []IngressRule{
-		{Hostname: "other.com", Service: "http://localhost:1"},
+func TestResolveHTTPService(t *testing.T) {
+	inboundInstance := newTestIngressInbound(t)
+	inboundInstance.configManager.activeConfig = RuntimeConfig{
+		Ingress: []compiledIngressRule{
+			{Hostname: "foo.com", Service: mustResolvedService(t, "http://127.0.0.1:8083")},
+			{Service: mustResolvedService(t, "http_status:404")},
+		},
 	}
 
-	original := "https://unknown.com/page"
-	result := inboundInstance.ResolveOriginURL(original)
-	if result != original {
-		t.Error("no match should return original, got ", result)
+	service, requestURL, err := inboundInstance.resolveHTTPService("https://foo.com/path?q=1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if service.Destination.String() != "127.0.0.1:8083" {
+		t.Fatalf("expected destination 127.0.0.1:8083, got %s", service.Destination)
+	}
+	if requestURL != "http://127.0.0.1:8083/path?q=1" {
+		t.Fatalf("expected rewritten URL, got %s", requestURL)
 	}
 }
 
-func TestResolveOriginURLHTTPStatus(t *testing.T) {
-	inboundInstance := newTestIngressInbound()
-	inboundInstance.ingressRules = []IngressRule{
-		{Hostname: "", Service: "http_status:404"},
+func TestResolveHTTPServiceStatus(t *testing.T) {
+	inboundInstance := newTestIngressInbound(t)
+	inboundInstance.configManager.activeConfig = RuntimeConfig{
+		Ingress: []compiledIngressRule{
+			{Service: mustResolvedService(t, "http_status:404")},
+		},
 	}
 
-	original := "https://any.com/page"
-	result := inboundInstance.ResolveOriginURL(original)
-	if result != original {
-		t.Error("http_status service should return original, got ", result)
+	service, requestURL, err := inboundInstance.resolveHTTPService("https://any.com/path")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if service.StatusCode != 404 {
+		t.Fatalf("expected status 404, got %#v", service)
+	}
+	if requestURL != "https://any.com/path" {
+		t.Fatalf("status service should keep request URL, got %s", requestURL)
 	}
 }

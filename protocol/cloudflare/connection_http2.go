@@ -90,10 +90,10 @@ func NewHTTP2Connection(
 		server: &http2.Server{
 			MaxConcurrentStreams: math.MaxUint32,
 		},
-		logger:      logger,
-		edgeAddr:    edgeAddr,
-		connIndex:   connIndex,
-		credentials: credentials,
+		logger:              logger,
+		edgeAddr:            edgeAddr,
+		connIndex:           connIndex,
+		credentials:         credentials,
 		connectorID:         connectorID,
 		features:            features,
 		numPreviousAttempts: numPreviousAttempts,
@@ -244,9 +244,13 @@ func (c *HTTP2Connection) handleConfigurationUpdate(r *http.Request, w http.Resp
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
-	c.inbound.UpdateIngress(body.Version, body.Config)
+	result := c.inbound.ApplyConfig(body.Version, body.Config)
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(`{"lastAppliedVersion":` + strconv.FormatInt(int64(body.Version), 10) + `,"err":null}`))
+	if result.Err != nil {
+		w.Write([]byte(`{"lastAppliedVersion":` + strconv.FormatInt(int64(result.LastAppliedVersion), 10) + `,"err":` + strconv.Quote(result.Err.Error()) + `}`))
+		return
+	}
+	w.Write([]byte(`{"lastAppliedVersion":` + strconv.FormatInt(int64(result.LastAppliedVersion), 10) + `,"err":null}`))
 }
 
 func (c *HTTP2Connection) close() {

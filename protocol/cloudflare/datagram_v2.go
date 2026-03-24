@@ -318,12 +318,17 @@ func (s *cloudflaredServer) UnregisterUdpSession(call tunnelrpc.SessionManager_u
 func (s *cloudflaredServer) UpdateConfiguration(call tunnelrpc.ConfigurationManager_updateConfiguration) error {
 	version := call.Params.Version()
 	configData, _ := call.Params.Config()
-	s.inbound.UpdateIngress(version, configData)
+	updateResult := s.inbound.ApplyConfig(version, configData)
 	result, err := call.Results.NewResult()
 	if err != nil {
 		return err
 	}
-	result.SetErr("")
+	result.SetLatestAppliedVersion(updateResult.LastAppliedVersion)
+	if updateResult.Err != nil {
+		result.SetErr(updateResult.Err.Error())
+	} else {
+		result.SetErr("")
+	}
 	return nil
 }
 
