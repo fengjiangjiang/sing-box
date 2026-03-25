@@ -6,6 +6,8 @@ import (
 	"context"
 	"encoding/binary"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/sagernet/sing-box/adapter"
@@ -16,6 +18,17 @@ import (
 
 	"github.com/google/uuid"
 )
+
+type captureConnectMetadataWriter struct {
+	err      error
+	metadata []Metadata
+}
+
+func (w *captureConnectMetadataWriter) WriteResponse(responseError error, metadata []Metadata) error {
+	w.err = responseError
+	w.metadata = append([]Metadata(nil), metadata...)
+	return nil
+}
 
 func newLimitedInbound(t *testing.T, limit uint64) *Inbound {
 	t.Helper()
@@ -53,6 +66,45 @@ func TestHandleTCPStreamRespectsMaxActiveFlows(t *testing.T) {
 	inboundInstance.handleTCPStream(context.Background(), stream, respWriter, adapter.InboundContext{})
 	if respWriter.err == nil {
 		t.Fatal("expected too many active flows error")
+	}
+}
+
+func TestHandleTCPStreamRateLimitMetadata(t *testing.T) {
+	inboundInstance := newLimitedInbound(t, 1)
+	if !inboundInstance.flowLimiter.Acquire(1) {
+		t.Fatal("failed to pre-acquire limiter")
+	}
+
+	stream, peer := net.Pipe()
+	defer stream.Close()
+	defer peer.Close()
+
+	respWriter := &captureConnectMetadataWriter{}
+	inboundInstance.handleTCPStream(context.Background(), stream, respWriter, adapter.InboundContext{})
+	if respWriter.err == nil {
+		t.Fatal("expected too many active flows error")
+	}
+	if !hasFlowConnectRateLimited(respWriter.metadata) {
+		t.Fatal("expected flow rate limit metadata")
+	}
+}
+
+func TestHTTP2ResponseWriterFlowRateLimitedMeta(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	writer := &http2ResponseWriter{
+		writer:  recorder,
+		flusher: recorder,
+	}
+
+	err := writer.WriteResponse(context.DeadlineExceeded, flowConnectRateLimitedMetadata())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recorder.Code != http.StatusBadGateway {
+		t.Fatalf("expected %d, got %d", http.StatusBadGateway, recorder.Code)
+	}
+	if meta := recorder.Header().Get(h2HeaderResponseMeta); meta != h2ResponseMetaCloudflaredLimited {
+		t.Fatalf("unexpected response meta: %q", meta)
 	}
 }
 

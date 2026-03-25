@@ -3,8 +3,10 @@
 package cloudflare
 
 import (
+	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"testing"
 )
 
@@ -73,5 +75,63 @@ func TestNewDirectOriginTransportNoHappyEyeballs(t *testing.T) {
 	}
 	if transport.DialContext == nil {
 		t.Fatal("expected custom direct dial context")
+	}
+}
+
+func TestNormalizeOriginRequestSetsKeepAliveAndEmptyUserAgent(t *testing.T) {
+	request, err := http.NewRequest(http.MethodGet, "https://example.com/path", http.NoBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	request = normalizeOriginRequest(ConnectionTypeHTTP, request, OriginRequestConfig{})
+	if connection := request.Header.Get("Connection"); connection != "keep-alive" {
+		t.Fatalf("expected keep-alive connection header, got %q", connection)
+	}
+	if values, exists := request.Header["User-Agent"]; !exists || len(values) != 1 || values[0] != "" {
+		t.Fatalf("expected empty User-Agent header, got %#v", request.Header["User-Agent"])
+	}
+}
+
+func TestNormalizeOriginRequestDisableChunkedEncoding(t *testing.T) {
+	request, err := http.NewRequest(http.MethodPost, "https://example.com/path", strings.NewReader("payload"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.TransferEncoding = []string{"chunked"}
+	request.Header.Set("Content-Length", "7")
+
+	request = normalizeOriginRequest(ConnectionTypeHTTP, request, OriginRequestConfig{
+		DisableChunkedEncoding: true,
+	})
+	if len(request.TransferEncoding) != 2 || request.TransferEncoding[0] != "gzip" || request.TransferEncoding[1] != "deflate" {
+		t.Fatalf("unexpected transfer encoding: %#v", request.TransferEncoding)
+	}
+	if request.ContentLength != 7 {
+		t.Fatalf("expected content length 7, got %d", request.ContentLength)
+	}
+}
+
+func TestNormalizeOriginRequestWebsocket(t *testing.T) {
+	request, err := http.NewRequest(http.MethodGet, "https://example.com/path", io.NopCloser(strings.NewReader("payload")))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	request = normalizeOriginRequest(ConnectionTypeWebsocket, request, OriginRequestConfig{})
+	if connection := request.Header.Get("Connection"); connection != "Upgrade" {
+		t.Fatalf("expected websocket connection header, got %q", connection)
+	}
+	if upgrade := request.Header.Get("Upgrade"); upgrade != "websocket" {
+		t.Fatalf("expected websocket upgrade header, got %q", upgrade)
+	}
+	if version := request.Header.Get("Sec-Websocket-Version"); version != "13" {
+		t.Fatalf("expected websocket version 13, got %q", version)
+	}
+	if request.ContentLength != 0 {
+		t.Fatalf("expected websocket content length 0, got %d", request.ContentLength)
+	}
+	if request.Body != nil {
+		t.Fatal("expected websocket body to be nil")
 	}
 }

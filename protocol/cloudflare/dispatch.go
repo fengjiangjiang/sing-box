@@ -182,7 +182,7 @@ func (i *Inbound) handleTCPStream(ctx context.Context, stream io.ReadWriteCloser
 	if !i.flowLimiter.Acquire(limit) {
 		err := E.New("too many active flows")
 		i.logger.ErrorContext(ctx, err)
-		respWriter.WriteResponse(err, nil)
+		respWriter.WriteResponse(err, flowConnectRateLimitedMetadata())
 		return
 	}
 	defer i.flowLimiter.Release(limit)
@@ -341,7 +341,7 @@ func (i *Inbound) roundTripHTTP(ctx context.Context, stream io.ReadWriteCloser, 
 		return
 	}
 
-	httpRequest = applyOriginRequest(httpRequest, service.OriginRequest)
+	httpRequest = normalizeOriginRequest(request.Type, httpRequest, service.OriginRequest)
 	requestCtx := httpRequest.Context()
 	if service.OriginRequest.ConnectTimeout > 0 {
 		var cancel context.CancelFunc
@@ -489,12 +489,33 @@ func applyOriginRequest(request *http.Request, originRequest OriginRequestConfig
 		request.Header.Set("X-Forwarded-Host", request.Host)
 		request.Host = originRequest.HTTPHostHeader
 	}
-	if originRequest.DisableChunkedEncoding && request.Header.Get("Content-Length") != "" {
-		if contentLength, err := strconv.ParseInt(request.Header.Get("Content-Length"), 10, 64); err == nil {
-			request.ContentLength = contentLength
-			request.TransferEncoding = nil
+	return request
+}
+
+func normalizeOriginRequest(connectType ConnectionType, request *http.Request, originRequest OriginRequestConfig) *http.Request {
+	request = applyOriginRequest(request, originRequest)
+
+	switch connectType {
+	case ConnectionTypeWebsocket:
+		request.Header.Set("Connection", "Upgrade")
+		request.Header.Set("Upgrade", "websocket")
+		request.Header.Set("Sec-Websocket-Version", "13")
+		request.ContentLength = 0
+		request.Body = nil
+	default:
+		if originRequest.DisableChunkedEncoding {
+			request.TransferEncoding = []string{"gzip", "deflate"}
+			if contentLength, err := strconv.ParseInt(request.Header.Get("Content-Length"), 10, 64); err == nil {
+				request.ContentLength = contentLength
+			}
 		}
+		request.Header.Set("Connection", "keep-alive")
 	}
+
+	if _, exists := request.Header["User-Agent"]; !exists {
+		request.Header.Set("User-Agent", "")
+	}
+
 	return request
 }
 

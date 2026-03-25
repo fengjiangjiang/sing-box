@@ -162,6 +162,10 @@ func (i *Inbound) Start(stage adapter.StartStage) error {
 	if len(edgeAddrs) == 0 {
 		return E.New("no edge addresses available")
 	}
+	if cappedHAConnections := effectiveHAConnections(i.haConnections, len(edgeAddrs)); cappedHAConnections != i.haConnections {
+		i.logger.Info("requested ", i.haConnections, " HA connections but only ", cappedHAConnections, " edge addresses are available")
+		i.haConnections = cappedHAConnections
+	}
 
 	i.datagramVersion = resolveDatagramVersion(i.ctx, i.credentials.AccountTag, i.datagramVersion)
 	features := DefaultFeatures(i.datagramVersion)
@@ -383,6 +387,16 @@ func flattenRegions(regions [][]*EdgeAddr) []*EdgeAddr {
 		result = append(result, region...)
 	}
 	return result
+}
+
+func effectiveHAConnections(requested, available int) int {
+	if available <= 0 {
+		return 0
+	}
+	if requested > available {
+		return available
+	}
+	return requested
 }
 
 func parseToken(token string) (Credentials, error) {

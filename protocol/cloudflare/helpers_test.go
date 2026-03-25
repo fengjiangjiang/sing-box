@@ -202,6 +202,8 @@ func newTestInbound(t *testing.T, token string, protocol string, haConnections i
 		datagramV2Muxers:  make(map[DatagramSender]*DatagramV2Muxer),
 		datagramV3Muxers:  make(map[DatagramSender]*DatagramV3Muxer),
 		datagramV3Manager: NewDatagramV3SessionManager(),
+		connectedIndices:  make(map[uint8]struct{}),
+		connectedNotify:   make(chan uint8, haConnections),
 		controlDialer:     N.SystemDialer,
 		accessCache:       &accessValidatorCache{values: make(map[string]accessValidator), dialer: N.SystemDialer},
 	}

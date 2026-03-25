@@ -124,3 +124,25 @@ func TestRotateEdgeAddrIndex(t *testing.T) {
 		t.Fatalf("expected single-address pool to stay at 0, got %d", got)
 	}
 }
+
+func TestEffectiveHAConnections(t *testing.T) {
+	tests := []struct {
+		name      string
+		requested int
+		available int
+		expected  int
+	}{
+		{name: "requested below available", requested: 2, available: 4, expected: 2},
+		{name: "requested equals available", requested: 4, available: 4, expected: 4},
+		{name: "requested above available", requested: 5, available: 3, expected: 3},
+		{name: "no available edges", requested: 4, available: 0, expected: 0},
+	}
+
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			if actual := effectiveHAConnections(testCase.requested, testCase.available); actual != testCase.expected {
+				t.Fatalf("effectiveHAConnections(%d, %d) = %d, want %d", testCase.requested, testCase.available, actual, testCase.expected)
+			}
+		})
+	}
+}

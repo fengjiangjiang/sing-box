@@ -24,7 +24,9 @@ import (
 )
 
 const (
-	h2EdgeSNI = "h2.cftunnel.com"
+	h2EdgeSNI                        = "h2.cftunnel.com"
+	h2ResponseMetaCloudflared        = `{"src":"cloudflared"}`
+	h2ResponseMetaCloudflaredLimited = `{"src":"cloudflared","flow_rate_limited":true}`
 )
 
 // HTTP2Connection manages a single HTTP/2 connection to the Cloudflare edge.
@@ -357,7 +359,11 @@ func (w *http2ResponseWriter) WriteResponse(responseError error, metadata []Meta
 	w.headersSent = true
 
 	if responseError != nil {
-		w.writer.Header().Set(h2HeaderResponseMeta, `{"src":"cloudflared"}`)
+		if hasFlowConnectRateLimited(metadata) {
+			w.writer.Header().Set(h2HeaderResponseMeta, h2ResponseMetaCloudflaredLimited)
+		} else {
+			w.writer.Header().Set(h2HeaderResponseMeta, h2ResponseMetaCloudflared)
+		}
 		w.writer.WriteHeader(http.StatusBadGateway)
 		w.flusher.Flush()
 		return nil

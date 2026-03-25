@@ -31,6 +31,8 @@ const (
 	StreamTypeRPC
 )
 
+const metadataFlowConnectRateLimited = "FlowConnectRateLimited"
+
 // ConnectionType indicates the proxied connection type within a data stream.
 type ConnectionType uint16
 
@@ -57,6 +59,22 @@ func (c ConnectionType) String() string {
 type Metadata struct {
 	Key string `capnp:"key"`
 	Val string `capnp:"val"`
+}
+
+func flowConnectRateLimitedMetadata() []Metadata {
+	return []Metadata{{
+		Key: metadataFlowConnectRateLimited,
+		Val: "true",
+	}}
+}
+
+func hasFlowConnectRateLimited(metadata []Metadata) bool {
+	for _, entry := range metadata {
+		if entry.Key == metadataFlowConnectRateLimited && entry.Val == "true" {
+			return true
+		}
+	}
+	return false
 }
 
 // ConnectRequest is sent by the edge at the start of a data stream.
