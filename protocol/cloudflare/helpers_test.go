@@ -197,6 +197,7 @@ func newTestInbound(t *testing.T, token string, protocol string, haConnections i
 		protocol:          protocol,
 		edgeIPVersion:     0,
 		datagramVersion:   "",
+		featureSelector:   newFeatureSelector(ctx, credentials.AccountTag, ""),
 		gracePeriod:       5 * time.Second,
 		configManager:     configManager,
 		datagramV2Muxers:  make(map[DatagramSender]*DatagramV2Muxer),

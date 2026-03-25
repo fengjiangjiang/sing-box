@@ -45,6 +45,7 @@ type QUICConnection struct {
 	connIndex           uint8
 	credentials         Credentials
 	connectorID         uuid.UUID
+	datagramVersion     string
 	features            []string
 	numPreviousAttempts uint8
 	gracePeriod         time.Duration
@@ -90,6 +91,7 @@ func NewQUICConnection(
 	connIndex uint8,
 	credentials Credentials,
 	connectorID uuid.UUID,
+	datagramVersion string,
 	features []string,
 	numPreviousAttempts uint8,
 	gracePeriod time.Duration,
@@ -136,6 +138,7 @@ func NewQUICConnection(
 		connIndex:           connIndex,
 		credentials:         credentials,
 		connectorID:         connectorID,
+		datagramVersion:     datagramVersion,
 		features:            features,
 		numPreviousAttempts: numPreviousAttempts,
 		gracePeriod:         gracePeriod,
@@ -279,6 +282,10 @@ func (q *QUICConnection) handleDatagrams(ctx context.Context, handler StreamHand
 // SendDatagram sends a QUIC datagram to the edge.
 func (q *QUICConnection) SendDatagram(data []byte) error {
 	return q.conn.SendDatagram(data)
+}
+
+func (q *QUICConnection) DatagramVersion() string {
+	return q.datagramVersion
 }
 
 func (q *QUICConnection) OpenRPCStream(ctx context.Context) (io.ReadWriteCloser, error) {

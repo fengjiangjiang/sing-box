@@ -5,6 +5,7 @@ package cloudflare
 import (
 	"io"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -132,7 +133,21 @@ func TestHTTPResponseCorrectness(t *testing.T) {
 	})
 
 	t.Run("PostEcho", func(t *testing.T) {
-		t.Skip("POST body streaming through QUIC data streams needs further investigation")
+		resp, err := http.Post(testURL+"/echo", "text/plain", strings.NewReader("payload"))
+		if err != nil {
+			t.Fatal("POST /echo: ", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatal("expected 200, got ", resp.StatusCode)
+		}
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatal("read body: ", err)
+		}
+		if string(body) != "payload" {
+			t.Error("unexpected body: ", string(body))
+		}
 	})
 }
 

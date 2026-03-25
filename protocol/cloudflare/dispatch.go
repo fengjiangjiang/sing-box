@@ -5,7 +5,6 @@ package cloudflare
 import (
 	"context"
 	"crypto/tls"
-	"crypto/x509"
 	"io"
 	"net"
 	"net/http"
@@ -30,6 +29,11 @@ const (
 	metadataHTTPHost   = "HttpHost"
 	metadataHTTPHeader = "HttpHeader"
 	metadataHTTPStatus = "HttpStatus"
+)
+
+var (
+	loadOriginCABasePool = cloudflareRootCertPool
+	readOriginCAFile     = os.ReadFile
 )
 
 // ConnectResponseWriter abstracts the response writing for both QUIC and HTTP/2.
@@ -71,7 +75,7 @@ func (i *Inbound) HandleRPCStreamWithSender(ctx context.Context, stream io.ReadW
 
 // HandleDatagram handles an incoming QUIC datagram.
 func (i *Inbound) HandleDatagram(ctx context.Context, datagram []byte, sender DatagramSender) {
-	switch i.datagramVersion {
+	switch datagramVersionForSender(sender) {
 	case "v3":
 		muxer := i.getOrCreateV3Muxer(sender)
 		muxer.HandleDatagram(ctx, datagram)
@@ -291,7 +295,12 @@ func (i *Inbound) handleHTTPStream(ctx context.Context, stream io.ReadWriteClose
 	metadata.Network = N.NetworkTCP
 	i.logger.InfoContext(ctx, "inbound HTTP connection to ", metadata.Destination)
 
-	transport, cleanup := i.newRouterOriginTransport(ctx, metadata, service.OriginRequest, request.MetadataMap()[metadataHTTPHost])
+	transport, cleanup, err := i.newRouterOriginTransport(ctx, metadata, service.OriginRequest, request.MetadataMap()[metadataHTTPHost])
+	if err != nil {
+		i.logger.ErrorContext(ctx, "build origin transport: ", err)
+		respWriter.WriteResponse(err, nil)
+		return
+	}
 	defer cleanup()
 	i.roundTripHTTP(ctx, stream, respWriter, request, service, transport)
 }
@@ -300,7 +309,12 @@ func (i *Inbound) handleWebSocketStream(ctx context.Context, stream io.ReadWrite
 	metadata.Network = N.NetworkTCP
 	i.logger.InfoContext(ctx, "inbound WebSocket connection to ", metadata.Destination)
 
-	transport, cleanup := i.newRouterOriginTransport(ctx, metadata, service.OriginRequest, request.MetadataMap()[metadataHTTPHost])
+	transport, cleanup, err := i.newRouterOriginTransport(ctx, metadata, service.OriginRequest, request.MetadataMap()[metadataHTTPHost])
+	if err != nil {
+		i.logger.ErrorContext(ctx, "build origin transport: ", err)
+		respWriter.WriteResponse(err, nil)
+		return
+	}
 	defer cleanup()
 	i.roundTripHTTP(ctx, stream, respWriter, request, service, transport)
 }
@@ -389,7 +403,11 @@ func (i *Inbound) roundTripHTTP(ctx context.Context, stream io.ReadWriteCloser, 
 	}
 }
 
-func (i *Inbound) newRouterOriginTransport(ctx context.Context, metadata adapter.InboundContext, originRequest OriginRequestConfig, requestHost string) (*http.Transport, func()) {
+func (i *Inbound) newRouterOriginTransport(ctx context.Context, metadata adapter.InboundContext, originRequest OriginRequestConfig, requestHost string) (*http.Transport, func(), error) {
+	tlsConfig, err := newOriginTLSConfig(originRequest, effectiveOriginHost(originRequest, requestHost))
+	if err != nil {
+		return nil, nil, err
+	}
 	input, cleanup, _ := i.dialRouterTCPWithMetadata(ctx, metadata, routedPipeTCPOptions{})
 
 	transport := &http.Transport{
@@ -399,13 +417,13 @@ func (i *Inbound) newRouterOriginTransport(ctx context.Context, metadata adapter
 		IdleConnTimeout:     originRequest.KeepAliveTimeout,
 		MaxIdleConns:        originRequest.KeepAliveConnections,
 		MaxIdleConnsPerHost: originRequest.KeepAliveConnections,
-		TLSClientConfig:     buildOriginTLSConfig(originRequest, requestHost),
+		Proxy:               http.ProxyFromEnvironment,
+		TLSClientConfig:     tlsConfig,
 		DialContext: func(_ context.Context, _, _ string) (net.Conn, error) {
 			return input, nil
 		},
 	}
-	applyHTTPTransportProxy(transport, originRequest)
-	return transport, cleanup
+	return transport, cleanup, nil
 }
 
 func (i *Inbound) newDirectOriginTransport(service ResolvedService, requestHost string) (*http.Transport, func(), error) {
@@ -416,6 +434,10 @@ func (i *Inbound) newDirectOriginTransport(service ResolvedService, requestHost 
 	if service.OriginRequest.NoHappyEyeballs {
 		dialer.FallbackDelay = -1
 	}
+	tlsConfig, err := newOriginTLSConfig(service.OriginRequest, effectiveOriginHost(service.OriginRequest, requestHost))
+	if err != nil {
+		return nil, nil, err
+	}
 	transport := &http.Transport{
 		DisableCompression:  true,
 		ForceAttemptHTTP2:   service.OriginRequest.HTTP2Origin,
@@ -423,9 +445,9 @@ func (i *Inbound) newDirectOriginTransport(service ResolvedService, requestHost 
 		IdleConnTimeout:     service.OriginRequest.KeepAliveTimeout,
 		MaxIdleConns:        service.OriginRequest.KeepAliveConnections,
 		MaxIdleConnsPerHost: service.OriginRequest.KeepAliveConnections,
-		TLSClientConfig:     buildOriginTLSConfig(service.OriginRequest, requestHost),
+		Proxy:               http.ProxyFromEnvironment,
+		TLSClientConfig:     tlsConfig,
 	}
-	applyHTTPTransportProxy(transport, service.OriginRequest)
 	switch service.Kind {
 	case ResolvedServiceUnix, ResolvedServiceUnixTLS:
 		transport.DialContext = func(ctx context.Context, _, _ string) (net.Conn, error) {
@@ -437,37 +459,34 @@ func (i *Inbound) newDirectOriginTransport(service ResolvedService, requestHost 
 	return transport, func() {}, nil
 }
 
-func buildOriginTLSConfig(originRequest OriginRequestConfig, requestHost string) *tls.Config {
+func effectiveOriginHost(originRequest OriginRequestConfig, requestHost string) string {
+	if originRequest.HTTPHostHeader != "" {
+		return originRequest.HTTPHostHeader
+	}
+	return requestHost
+}
+
+func newOriginTLSConfig(originRequest OriginRequestConfig, requestHost string) (*tls.Config, error) {
+	rootCAs, err := loadOriginCABasePool()
+	if err != nil {
+		return nil, E.Cause(err, "load origin root CAs")
+	}
 	tlsConfig := &tls.Config{
 		InsecureSkipVerify: originRequest.NoTLSVerify, //nolint:gosec
 		ServerName:         originTLSServerName(originRequest, requestHost),
+		RootCAs:            rootCAs,
 	}
 	if originRequest.CAPool == "" {
-		return tlsConfig
+		return tlsConfig, nil
 	}
-	pemData, err := os.ReadFile(originRequest.CAPool)
+	pemData, err := readOriginCAFile(originRequest.CAPool)
 	if err != nil {
-		return tlsConfig
+		return nil, E.Cause(err, "read origin ca pool")
 	}
-	pool := x509.NewCertPool()
-	if pool.AppendCertsFromPEM(pemData) {
-		tlsConfig.RootCAs = pool
+	if !tlsConfig.RootCAs.AppendCertsFromPEM(pemData) {
+		return nil, E.New("parse origin ca pool")
 	}
-	return tlsConfig
-}
-
-func applyHTTPTransportProxy(transport *http.Transport, originRequest OriginRequestConfig) {
-	if originRequest.ProxyAddress == "" || originRequest.ProxyPort == 0 {
-		return
-	}
-	switch strings.ToLower(originRequest.ProxyType) {
-	case "", "http":
-		proxyURL := &url.URL{
-			Scheme: "http",
-			Host:   net.JoinHostPort(originRequest.ProxyAddress, strconv.Itoa(int(originRequest.ProxyPort))),
-		}
-		transport.Proxy = http.ProxyURL(proxyURL)
-	}
+	return tlsConfig, nil
 }
 
 func originTLSServerName(originRequest OriginRequestConfig, requestHost string) string {
@@ -591,11 +610,11 @@ func buildHTTPRequestFromMetadata(ctx context.Context, connectRequest *ConnectRe
 
 func isTransferEncodingChunked(request *http.Request) bool {
 	for _, encoding := range request.TransferEncoding {
-		if strings.EqualFold(encoding, "chunked") {
+		if strings.Contains(strings.ToLower(encoding), "chunked") {
 			return true
 		}
 	}
-	return false
+	return strings.Contains(strings.ToLower(request.Header.Get("Transfer-Encoding")), "chunked")
 }
 
 func encodeResponseHeaders(statusCode int, header http.Header) []Metadata {
@@ -629,3 +648,19 @@ func (c *streamConn) RemoteAddr() net.Addr               { return nil }
 func (c *streamConn) SetDeadline(_ time.Time) error      { return nil }
 func (c *streamConn) SetReadDeadline(_ time.Time) error  { return nil }
 func (c *streamConn) SetWriteDeadline(_ time.Time) error { return nil }
+
+type datagramVersionedSender interface {
+	DatagramVersion() string
+}
+
+func datagramVersionForSender(sender DatagramSender) string {
+	versioned, ok := sender.(datagramVersionedSender)
+	if !ok {
+		return defaultDatagramVersion
+	}
+	version := versioned.DatagramVersion()
+	if version == "" {
+		return defaultDatagramVersion
+	}
+	return version
+}

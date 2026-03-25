@@ -43,6 +43,7 @@ type Inbound struct {
 	region          string
 	edgeIPVersion   int
 	datagramVersion string
+	featureSelector *featureSelector
 	gracePeriod     time.Duration
 	configManager   *ConfigManager
 	flowLimiter     *FlowLimiter
@@ -133,6 +134,7 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 		region:            region,
 		edgeIPVersion:     edgeIPVersion,
 		datagramVersion:   datagramVersion,
+		featureSelector:   newFeatureSelector(inboundCtx, credentials.AccountTag, datagramVersion),
 		gracePeriod:       gracePeriod,
 		configManager:     configManager,
 		flowLimiter:       &FlowLimiter{},
@@ -167,12 +169,9 @@ func (i *Inbound) Start(stage adapter.StartStage) error {
 		i.haConnections = cappedHAConnections
 	}
 
-	i.datagramVersion = resolveDatagramVersion(i.ctx, i.credentials.AccountTag, i.datagramVersion)
-	features := DefaultFeatures(i.datagramVersion)
-
 	for connIndex := 0; connIndex < i.haConnections; connIndex++ {
 		i.done.Add(1)
-		go i.superviseConnection(uint8(connIndex), edgeAddrs, features)
+		go i.superviseConnection(uint8(connIndex), edgeAddrs)
 		select {
 		case readyConnIndex := <-i.connectedNotify:
 			if readyConnIndex != uint8(connIndex) {
@@ -235,7 +234,7 @@ const (
 	firstConnectionReadyTimeout = 15 * time.Second
 )
 
-func (i *Inbound) superviseConnection(connIndex uint8, edgeAddrs []*EdgeAddr, features []string) {
+func (i *Inbound) superviseConnection(connIndex uint8, edgeAddrs []*EdgeAddr) {
 	defer i.done.Done()
 
 	edgeIndex := initialEdgeAddrIndex(connIndex, len(edgeAddrs))
@@ -248,7 +247,7 @@ func (i *Inbound) superviseConnection(connIndex uint8, edgeAddrs []*EdgeAddr, fe
 		}
 
 		edgeAddr := edgeAddrs[edgeIndex]
-		err := i.serveConnection(connIndex, edgeAddr, features, uint8(retries))
+		err := i.serveConnection(connIndex, edgeAddr, uint8(retries))
 		if err == nil || i.ctx.Err() != nil {
 			return
 		}
@@ -275,15 +274,16 @@ func (i *Inbound) superviseConnection(connIndex uint8, edgeAddrs []*EdgeAddr, fe
 	}
 }
 
-func (i *Inbound) serveConnection(connIndex uint8, edgeAddr *EdgeAddr, features []string, numPreviousAttempts uint8) error {
+func (i *Inbound) serveConnection(connIndex uint8, edgeAddr *EdgeAddr, numPreviousAttempts uint8) error {
 	protocol := i.protocol
 	if protocol == "" {
 		protocol = "quic"
 	}
+	datagramVersion, features := i.currentConnectionFeatures()
 
 	switch protocol {
 	case "quic":
-		err := i.serveQUIC(connIndex, edgeAddr, features, numPreviousAttempts)
+		err := i.serveQUIC(connIndex, edgeAddr, datagramVersion, features, numPreviousAttempts)
 		if err == nil || i.ctx.Err() != nil {
 			return err
 		}
@@ -299,12 +299,12 @@ func (i *Inbound) serveConnection(connIndex uint8, edgeAddr *EdgeAddr, features 
 	}
 }
 
-func (i *Inbound) serveQUIC(connIndex uint8, edgeAddr *EdgeAddr, features []string, numPreviousAttempts uint8) error {
+func (i *Inbound) serveQUIC(connIndex uint8, edgeAddr *EdgeAddr, datagramVersion string, features []string, numPreviousAttempts uint8) error {
 	i.logger.Info("connecting to edge via QUIC (connection ", connIndex, ")")
 
 	connection, err := NewQUICConnection(
 		i.ctx, edgeAddr, connIndex,
-		i.credentials, i.connectorID,
+		i.credentials, i.connectorID, datagramVersion,
 		features, numPreviousAttempts, i.gracePeriod, i.controlDialer, func() {
 			i.notifyConnected(connIndex)
 		}, i.logger,
@@ -320,6 +320,17 @@ func (i *Inbound) serveQUIC(connIndex uint8, edgeAddr *EdgeAddr, features []stri
 	}()
 
 	return connection.Serve(i.ctx, i)
+}
+
+func (i *Inbound) currentConnectionFeatures() (string, []string) {
+	if i.featureSelector != nil {
+		return i.featureSelector.Snapshot()
+	}
+	version := i.datagramVersion
+	if version == "" {
+		version = defaultDatagramVersion
+	}
+	return version, DefaultFeatures(version)
 }
 
 func (i *Inbound) serveHTTP2(connIndex uint8, edgeAddr *EdgeAddr, features []string, numPreviousAttempts uint8) error {
