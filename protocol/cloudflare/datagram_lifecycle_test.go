@@ -5,11 +5,16 @@ package cloudflare
 import (
 	"context"
 	"encoding/binary"
+	"io"
 	"net"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/sagernet/sing-box/adapter"
+	"github.com/sagernet/sing/common/buf"
+	M "github.com/sagernet/sing/common/metadata"
+	N "github.com/sagernet/sing/common/network"
 )
 
 type v2UnregisterCall struct {
@@ -23,6 +28,43 @@ type captureRPCDatagramSender struct {
 
 type captureV2SessionRPCClient struct {
 	unregisterCh chan v2UnregisterCall
+}
+
+type blockingPacketConn struct {
+	closed chan struct{}
+}
+
+func newBlockingPacketConn() *blockingPacketConn {
+	return &blockingPacketConn{closed: make(chan struct{})}
+}
+
+func (c *blockingPacketConn) ReadPacket(_ *buf.Buffer) (M.Socksaddr, error) {
+	<-c.closed
+	return M.Socksaddr{}, io.EOF
+}
+
+func (c *blockingPacketConn) WritePacket(buffer *buf.Buffer, _ M.Socksaddr) error {
+	buffer.Release()
+	return nil
+}
+
+func (c *blockingPacketConn) Close() error {
+	closeOnce(c.closed)
+	return nil
+}
+
+func (c *blockingPacketConn) LocalAddr() net.Addr              { return &net.UDPAddr{} }
+func (c *blockingPacketConn) SetDeadline(time.Time) error      { return nil }
+func (c *blockingPacketConn) SetReadDeadline(time.Time) error  { return nil }
+func (c *blockingPacketConn) SetWriteDeadline(time.Time) error { return nil }
+
+type packetDialingRouter struct {
+	testRouter
+	packetConn N.PacketConn
+}
+
+func (r *packetDialingRouter) DialRoutePacketConnection(ctx context.Context, metadata adapter.InboundContext) (N.PacketConn, error) {
+	return r.packetConn, nil
 }
 
 func (c *captureV2SessionRPCClient) UnregisterSession(ctx context.Context, sessionID uuid.UUID, message string) error {
@@ -104,4 +146,58 @@ func TestDatagramV3RegistrationMigratesSender(t *testing.T) {
 	}
 
 	session.close()
+}
+
+func TestDatagramV3MigrationUpdatesSessionContext(t *testing.T) {
+	packetConn := newBlockingPacketConn()
+	inboundInstance := newLimitedInbound(t, 0)
+	inboundInstance.router = &packetDialingRouter{packetConn: packetConn}
+	sender1 := &captureDatagramSender{}
+	sender2 := &captureDatagramSender{}
+	muxer1 := NewDatagramV3Muxer(inboundInstance, sender1, inboundInstance.logger)
+	muxer2 := NewDatagramV3Muxer(inboundInstance, sender2, inboundInstance.logger)
+
+	requestID := RequestID{}
+	requestID[15] = 10
+	payload := make([]byte, 1+2+2+16+4)
+	payload[0] = 0
+	binary.BigEndian.PutUint16(payload[1:3], 53)
+	binary.BigEndian.PutUint16(payload[3:5], 30)
+	copy(payload[5:21], requestID[:])
+	copy(payload[21:25], []byte{127, 0, 0, 1})
+
+	ctx1, cancel1 := context.WithCancel(context.Background())
+	muxer1.handleRegistration(ctx1, payload)
+
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	muxer2.handleRegistration(ctx2, payload)
+
+	cancel1()
+	time.Sleep(50 * time.Millisecond)
+
+	session, exists := inboundInstance.datagramV3Manager.Get(requestID)
+	if !exists {
+		t.Fatal("expected session to survive old connection context cancellation")
+	}
+
+	session.senderAccess.RLock()
+	currentSender := session.sender
+	session.senderAccess.RUnlock()
+	if currentSender != sender2 {
+		t.Fatal("expected migrated sender to stay active")
+	}
+
+	cancel2()
+
+	deadline := time.After(time.Second)
+	for {
+		if _, exists := inboundInstance.datagramV3Manager.Get(requestID); !exists {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatal("expected session to be removed after new context cancellation")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
 }

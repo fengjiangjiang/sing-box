@@ -37,6 +37,7 @@ const (
 	v3RegistrationBaseLen = 1 + v3RegistrationFlagLen + v3RegistrationPortLen + v3RegistrationIdleLen + v3RequestIDLength // 22
 	v3PayloadHeaderLen    = 1 + v3RequestIDLength                                                                         // 17
 	v3RegistrationRespLen = 1 + 1 + v3RequestIDLength + 2                                                                 // 20
+	maxV3UDPPayloadLen    = 1280
 
 	// V3 registration flags
 	v3FlagIPv6   byte = 0x01
@@ -238,6 +239,10 @@ type v3Session struct {
 
 	senderAccess sync.RWMutex
 	sender       DatagramSender
+
+	contextAccess sync.RWMutex
+	connCtx       context.Context
+	contextChan   chan context.Context
 }
 
 var errTooManyActiveFlows = errors.New("too many active flows")
@@ -253,11 +258,12 @@ func (m *DatagramV3SessionManager) Register(
 	m.sessionAccess.Lock()
 	if existing, exists := m.sessions[requestID]; exists {
 		if existing.sender == sender {
+			existing.updateContext(ctx)
 			existing.markActive()
 			m.sessionAccess.Unlock()
 			return existing, v3RegistrationExisting, nil
 		}
-		existing.setSender(sender)
+		existing.migrate(sender, ctx)
 		existing.markActive()
 		m.sessionAccess.Unlock()
 		return existing, v3RegistrationMigrated, nil
@@ -286,14 +292,17 @@ func (m *DatagramV3SessionManager) Register(
 		closeChan:      make(chan struct{}),
 		activeAt:       time.Now(),
 		sender:         sender,
+		connCtx:        ctx,
+		contextChan:    make(chan context.Context, 1),
 	}
 	m.sessions[requestID] = session
 	m.sessionAccess.Unlock()
 
-	sessionCtx := inbound.ctx
+	sessionCtx := ctx
 	if sessionCtx == nil {
 		sessionCtx = context.Background()
 	}
+	session.connCtx = sessionCtx
 	go session.serve(sessionCtx, limit)
 	return session, v3RegistrationNew, nil
 }
@@ -320,6 +329,8 @@ func (s *v3Session) serve(ctx context.Context, limit uint64) {
 	go s.readLoop()
 	go s.writeLoop()
 
+	connCtx := ctx
+
 	tickInterval := s.closeAfterIdle / 2
 	if tickInterval <= 0 || tickInterval > 10*time.Second {
 		tickInterval = time.Second
@@ -329,8 +340,16 @@ func (s *v3Session) serve(ctx context.Context, limit uint64) {
 
 	for {
 		select {
-		case <-ctx.Done():
+		case <-connCtx.Done():
+			if latestCtx := s.currentContext(); latestCtx != nil && latestCtx != connCtx {
+				connCtx = latestCtx
+				continue
+			}
 			s.close()
+		case newCtx := <-s.contextChan:
+			if newCtx != nil {
+				connCtx = newCtx
+			}
 		case <-ticker.C:
 			if time.Since(s.lastActive()) >= s.closeAfterIdle {
 				s.close()
@@ -349,6 +368,11 @@ func (s *v3Session) readLoop() {
 			buffer.Release()
 			s.close()
 			return
+		}
+		if buffer.Len() > maxV3UDPPayloadLen {
+			s.inbound.logger.Debug("drop oversized V3 UDP payload: ", buffer.Len())
+			buffer.Release()
+			continue
 		}
 		s.markActive()
 		if err := s.senderDatagram(append([]byte(nil), buffer.Bytes()...)); err != nil {
@@ -401,6 +425,35 @@ func (s *v3Session) setSender(sender DatagramSender) {
 	s.senderAccess.Lock()
 	s.sender = sender
 	s.senderAccess.Unlock()
+}
+
+func (s *v3Session) updateContext(ctx context.Context) {
+	if ctx == nil {
+		return
+	}
+	s.contextAccess.Lock()
+	s.connCtx = ctx
+	s.contextAccess.Unlock()
+	select {
+	case s.contextChan <- ctx:
+	default:
+		select {
+		case <-s.contextChan:
+		default:
+		}
+		s.contextChan <- ctx
+	}
+}
+
+func (s *v3Session) migrate(sender DatagramSender, ctx context.Context) {
+	s.setSender(sender)
+	s.updateContext(ctx)
+}
+
+func (s *v3Session) currentContext() context.Context {
+	s.contextAccess.RLock()
+	defer s.contextAccess.RUnlock()
+	return s.connCtx
 }
 
 func (s *v3Session) markActive() {

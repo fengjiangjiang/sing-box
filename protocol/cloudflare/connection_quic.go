@@ -48,11 +48,14 @@ type QUICConnection struct {
 	features            []string
 	numPreviousAttempts uint8
 	gracePeriod         time.Duration
-	registrationClient  *RegistrationClient
+	registrationClient  registrationRPCClient
 	registrationResult  *RegistrationResult
 	onConnected         func()
 
-	closeOnce sync.Once
+	serveCancel       context.CancelFunc
+	registrationClose sync.Once
+	shutdownOnce      sync.Once
+	closeOnce         sync.Once
 }
 
 type quicConnection interface {
@@ -180,22 +183,29 @@ func (q *QUICConnection) Serve(ctx context.Context, handler StreamHandler) error
 	q.logger.Info("connected to ", q.registrationResult.Location,
 		" (connection ", q.registrationResult.ConnectionID, ")")
 
+	serveCtx, serveCancel := context.WithCancel(context.WithoutCancel(ctx))
+	q.serveCancel = serveCancel
+
 	errChan := make(chan error, 2)
 
 	go func() {
-		errChan <- q.acceptStreams(ctx, handler)
+		errChan <- q.acceptStreams(serveCtx, handler)
 	}()
 
 	go func() {
-		errChan <- q.handleDatagrams(ctx, handler)
+		errChan <- q.handleDatagrams(serveCtx, handler)
 	}()
 
 	select {
 	case <-ctx.Done():
 		q.gracefulShutdown()
+		<-errChan
 		return ctx.Err()
 	case err = <-errChan:
-		q.gracefulShutdown()
+		q.forceClose()
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		return err
 	}
 }
@@ -285,23 +295,55 @@ func (q *QUICConnection) OpenRPCStream(ctx context.Context) (io.ReadWriteCloser,
 }
 
 func (q *QUICConnection) gracefulShutdown() {
-	q.closeOnce.Do(func() {
-		if q.registrationClient != nil {
-			ctx, cancel := context.WithTimeout(context.Background(), q.gracePeriod)
-			defer cancel()
-			err := q.registrationClient.Unregister(ctx)
-			if err != nil {
-				q.logger.Debug("failed to unregister: ", err)
-			}
-			q.registrationClient.Close()
+	q.shutdownOnce.Do(func() {
+		if q.registrationClient == nil || q.registrationResult == nil {
+			q.closeNow("connection closed")
+			return
 		}
-		q.conn.CloseWithError(0, "graceful shutdown")
+
+		ctx, cancel := context.WithTimeout(context.Background(), q.gracePeriod)
+		err := q.registrationClient.Unregister(ctx)
+		cancel()
+		if err != nil {
+			q.logger.Debug("failed to unregister: ", err)
+		}
+		q.closeRegistrationClient()
+		if q.gracePeriod > 0 {
+			timer := time.NewTimer(q.gracePeriod)
+			<-timer.C
+			timer.Stop()
+		}
+		q.closeNow("graceful shutdown")
+	})
+}
+
+func (q *QUICConnection) forceClose() {
+	q.shutdownOnce.Do(func() {
+		q.closeNow("connection closed")
+	})
+}
+
+func (q *QUICConnection) closeRegistrationClient() {
+	q.registrationClose.Do(func() {
+		if q.registrationClient != nil {
+			_ = q.registrationClient.Close()
+		}
+	})
+}
+
+func (q *QUICConnection) closeNow(reason string) {
+	q.closeOnce.Do(func() {
+		if q.serveCancel != nil {
+			q.serveCancel()
+		}
+		q.closeRegistrationClient()
+		_ = q.conn.CloseWithError(0, reason)
 	})
 }
 
 // Close closes the QUIC connection immediately.
 func (q *QUICConnection) Close() error {
-	q.gracefulShutdown()
+	q.forceClose()
 	return nil
 }
 

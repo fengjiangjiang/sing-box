@@ -44,12 +44,15 @@ type HTTP2Connection struct {
 	inbound     *Inbound
 
 	numPreviousAttempts uint8
-	registrationClient  *RegistrationClient
+	registrationClient  registrationRPCClient
 	registrationResult  *RegistrationResult
 	controlStreamErr    error
 
-	activeRequests sync.WaitGroup
-	closeOnce      sync.Once
+	activeRequests    sync.WaitGroup
+	serveCancel       context.CancelFunc
+	registrationClose sync.Once
+	shutdownOnce      sync.Once
+	closeOnce         sync.Once
 }
 
 // NewHTTP2Connection dials the edge and establishes an HTTP/2 connection with role reversal.
@@ -106,21 +109,27 @@ func NewHTTP2Connection(
 
 // Serve runs the HTTP/2 server. Blocks until the context is cancelled or the connection ends.
 func (c *HTTP2Connection) Serve(ctx context.Context) error {
+	serveCtx, serveCancel := context.WithCancel(context.WithoutCancel(ctx))
+	c.serveCancel = serveCancel
+
+	shutdownDone := make(chan struct{})
 	go func() {
 		<-ctx.Done()
-		c.close()
+		c.gracefulShutdown()
+		close(shutdownDone)
 	}()
 
 	c.server.ServeConn(c.conn, &http2.ServeConnOpts{
-		Context: ctx,
+		Context: serveCtx,
 		Handler: c,
 	})
 
+	if ctx.Err() != nil {
+		<-shutdownDone
+		return ctx.Err()
+	}
 	if c.controlStreamErr != nil {
 		return c.controlStreamErr
-	}
-	if ctx.Err() != nil {
-		return ctx.Err()
 	}
 	if c.registrationResult == nil {
 		return E.New("edge connection closed before registration")
@@ -129,12 +138,15 @@ func (c *HTTP2Connection) Serve(ctx context.Context) error {
 }
 
 func (c *HTTP2Connection) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Header.Get(h2HeaderUpgrade) == h2UpgradeControlStream {
+		c.handleControlStream(r.Context(), r, w)
+		return
+	}
+
 	c.activeRequests.Add(1)
 	defer c.activeRequests.Done()
 
 	switch {
-	case r.Header.Get(h2HeaderUpgrade) == h2UpgradeControlStream:
-		c.handleControlStream(r.Context(), r, w)
 	case r.Header.Get(h2HeaderUpgrade) == h2UpgradeWebsocket:
 		c.handleH2DataStream(r.Context(), r, w, ConnectionTypeWebsocket)
 	case r.Header.Get(h2HeaderTCPSrc) != "":
@@ -169,17 +181,13 @@ func (c *HTTP2Connection) handleControlStream(ctx context.Context, r *http.Reque
 	if err != nil {
 		c.controlStreamErr = err
 		c.logger.Error("register connection: ", err)
-		if c.registrationClient != nil {
-			c.registrationClient.Close()
-		}
-		go c.close()
+		go c.forceClose()
 		return
 	}
 	if err := validateRegistrationResult(result); err != nil {
 		c.controlStreamErr = err
 		c.logger.Error("register connection: ", err)
-		c.registrationClient.Close()
-		go c.close()
+		go c.forceClose()
 		return
 	}
 	c.registrationResult = result
@@ -189,13 +197,6 @@ func (c *HTTP2Connection) handleControlStream(ctx context.Context, r *http.Reque
 		" (connection ", result.ConnectionID, ")")
 
 	<-ctx.Done()
-	unregisterCtx, cancel := context.WithTimeout(context.Background(), c.gracePeriod)
-	defer cancel()
-	err = c.registrationClient.Unregister(unregisterCtx)
-	if err != nil {
-		c.logger.Debug("failed to unregister: ", err)
-	}
-	c.registrationClient.Close()
 }
 
 func (c *HTTP2Connection) handleH2DataStream(ctx context.Context, r *http.Request, w http.ResponseWriter, connectionType ConnectionType) {
@@ -280,16 +281,74 @@ func (c *HTTP2Connection) handleConfigurationUpdate(r *http.Request, w http.Resp
 	w.Write([]byte(`{"lastAppliedVersion":` + strconv.FormatInt(int64(result.LastAppliedVersion), 10) + `,"err":null}`))
 }
 
-func (c *HTTP2Connection) close() {
+func (c *HTTP2Connection) gracefulShutdown() {
+	c.shutdownOnce.Do(func() {
+		if c.registrationClient == nil || c.registrationResult == nil {
+			c.closeNow()
+			return
+		}
+
+		unregisterCtx, cancel := context.WithTimeout(context.Background(), c.gracePeriod)
+		err := c.registrationClient.Unregister(unregisterCtx)
+		cancel()
+		if err != nil {
+			c.logger.Debug("failed to unregister: ", err)
+		}
+		c.closeRegistrationClient()
+		c.waitForActiveRequests(c.gracePeriod)
+		c.closeNow()
+	})
+}
+
+func (c *HTTP2Connection) forceClose() {
+	c.shutdownOnce.Do(func() {
+		c.closeNow()
+	})
+}
+
+func (c *HTTP2Connection) waitForActiveRequests(timeout time.Duration) {
+	if timeout <= 0 {
+		c.activeRequests.Wait()
+		return
+	}
+
+	done := make(chan struct{})
+	go func() {
+		c.activeRequests.Wait()
+		close(done)
+	}()
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	select {
+	case <-done:
+	case <-timer.C:
+	}
+}
+
+func (c *HTTP2Connection) closeRegistrationClient() {
+	c.registrationClose.Do(func() {
+		if c.registrationClient != nil {
+			_ = c.registrationClient.Close()
+		}
+	})
+}
+
+func (c *HTTP2Connection) closeNow() {
 	c.closeOnce.Do(func() {
-		c.conn.Close()
+		_ = c.conn.Close()
+		if c.serveCancel != nil {
+			c.serveCancel()
+		}
+		c.closeRegistrationClient()
 		c.activeRequests.Wait()
 	})
 }
 
 // Close closes the HTTP/2 connection.
 func (c *HTTP2Connection) Close() error {
-	c.close()
+	c.forceClose()
 	return nil
 }
 

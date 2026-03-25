@@ -31,6 +31,18 @@ type RegistrationClient struct {
 	transport rpc.Transport
 }
 
+type registrationRPCClient interface {
+	RegisterConnection(
+		ctx context.Context,
+		auth TunnelAuth,
+		tunnelID uuid.UUID,
+		connIndex uint8,
+		options *RegistrationConnectionOptions,
+	) (*RegistrationResult, error)
+	Unregister(ctx context.Context) error
+	Close() error
+}
+
 // NewRegistrationClient creates a Cap'n Proto RPC client over the given stream.
 // The stream should be the first QUIC stream (control stream).
 func NewRegistrationClient(ctx context.Context, stream io.ReadWriteCloser) *RegistrationClient {

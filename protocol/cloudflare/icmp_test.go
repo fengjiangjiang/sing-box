@@ -169,6 +169,158 @@ func TestICMPBridgeHandleV3Reply(t *testing.T) {
 	}
 }
 
+func TestICMPBridgeDecrementsIPv4TTLBeforeRouting(t *testing.T) {
+	var destination *fakeDirectRouteDestination
+	router := &testRouter{
+		preMatch: func(metadata adapter.InboundContext, routeContext tun.DirectRouteContext, timeout time.Duration, supportBypass bool) (tun.DirectRouteDestination, error) {
+			destination = &fakeDirectRouteDestination{routeContext: routeContext}
+			return destination, nil
+		},
+	}
+	inboundInstance := &Inbound{
+		Adapter: inbound.NewAdapter(C.TypeCloudflared, "test"),
+		router:  router,
+	}
+	bridge := NewICMPBridge(inboundInstance, &captureDatagramSender{}, icmpWireV2)
+
+	packet := buildIPv4ICMPPacket(netip.MustParseAddr("198.18.0.2"), netip.MustParseAddr("1.1.1.1"), icmpv4TypeEchoRequest, 0, 1, 1)
+	packet[8] = 5
+
+	if err := bridge.HandleV2(context.Background(), DatagramV2TypeIP, packet); err != nil {
+		t.Fatal(err)
+	}
+	if len(destination.packets) != 1 {
+		t.Fatalf("expected one routed packet, got %d", len(destination.packets))
+	}
+	if got := destination.packets[0][8]; got != 4 {
+		t.Fatalf("expected decremented IPv4 TTL, got %d", got)
+	}
+}
+
+func TestICMPBridgeDecrementsIPv6HopLimitBeforeRouting(t *testing.T) {
+	var destination *fakeDirectRouteDestination
+	router := &testRouter{
+		preMatch: func(metadata adapter.InboundContext, routeContext tun.DirectRouteContext, timeout time.Duration, supportBypass bool) (tun.DirectRouteDestination, error) {
+			destination = &fakeDirectRouteDestination{routeContext: routeContext}
+			return destination, nil
+		},
+	}
+	inboundInstance := &Inbound{
+		Adapter: inbound.NewAdapter(C.TypeCloudflared, "test"),
+		router:  router,
+	}
+	bridge := NewICMPBridge(inboundInstance, &captureDatagramSender{}, icmpWireV3)
+
+	packet := buildIPv6ICMPPacket(netip.MustParseAddr("2001:db8::2"), netip.MustParseAddr("2606:4700:4700::1111"), icmpv6TypeEchoRequest, 0, 1, 1)
+	packet[7] = 3
+
+	if err := bridge.HandleV3(context.Background(), packet); err != nil {
+		t.Fatal(err)
+	}
+	if len(destination.packets) != 1 {
+		t.Fatalf("expected one routed packet, got %d", len(destination.packets))
+	}
+	if got := destination.packets[0][7]; got != 2 {
+		t.Fatalf("expected decremented IPv6 hop limit, got %d", got)
+	}
+}
+
+func TestICMPBridgeHandleV2TTLExceededTracedReply(t *testing.T) {
+	var preMatchCalls int
+	traceIdentity := bytes.Repeat([]byte{0x6b}, icmpTraceIdentityLength)
+	sender := &captureDatagramSender{}
+	router := &testRouter{
+		preMatch: func(metadata adapter.InboundContext, routeContext tun.DirectRouteContext, timeout time.Duration, supportBypass bool) (tun.DirectRouteDestination, error) {
+			preMatchCalls++
+			return nil, nil
+		},
+	}
+	inboundInstance := &Inbound{
+		Adapter: inbound.NewAdapter(C.TypeCloudflared, "test"),
+		router:  router,
+	}
+	bridge := NewICMPBridge(inboundInstance, sender, icmpWireV2)
+
+	source := netip.MustParseAddr("198.18.0.2")
+	target := netip.MustParseAddr("1.1.1.1")
+	packet := buildIPv4ICMPPacket(source, target, icmpv4TypeEchoRequest, 0, 1, 1)
+	packet[8] = 1
+	packet = append(packet, traceIdentity...)
+
+	if err := bridge.HandleV2(context.Background(), DatagramV2TypeIPWithTrace, packet); err != nil {
+		t.Fatal(err)
+	}
+	if preMatchCalls != 0 {
+		t.Fatalf("expected TTL exceeded to bypass routing, got %d route lookups", preMatchCalls)
+	}
+	if len(sender.sent) != 1 {
+		t.Fatalf("expected one TTL exceeded reply, got %d", len(sender.sent))
+	}
+	reply := sender.sent[0]
+	if reply[len(reply)-1] != byte(DatagramV2TypeIPWithTrace) {
+		t.Fatalf("expected traced v2 reply, got type %d", reply[len(reply)-1])
+	}
+	gotIdentity := reply[len(reply)-1-icmpTraceIdentityLength : len(reply)-1]
+	if !bytes.Equal(gotIdentity, traceIdentity) {
+		t.Fatalf("unexpected trace identity: %x", gotIdentity)
+	}
+	rawReply := reply[:len(reply)-1-icmpTraceIdentityLength]
+	packetInfo, err := ParseICMPPacket(rawReply)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if packetInfo.ICMPType != icmpv4TypeTimeExceeded || packetInfo.ICMPCode != 0 {
+		t.Fatalf("expected IPv4 time exceeded reply, got type=%d code=%d", packetInfo.ICMPType, packetInfo.ICMPCode)
+	}
+	if packetInfo.SourceIP != target || packetInfo.Destination != source {
+		t.Fatalf("unexpected TTL exceeded routing: src=%s dst=%s", packetInfo.SourceIP, packetInfo.Destination)
+	}
+}
+
+func TestICMPBridgeHandleV3TTLExceededReply(t *testing.T) {
+	var preMatchCalls int
+	sender := &captureDatagramSender{}
+	router := &testRouter{
+		preMatch: func(metadata adapter.InboundContext, routeContext tun.DirectRouteContext, timeout time.Duration, supportBypass bool) (tun.DirectRouteDestination, error) {
+			preMatchCalls++
+			return nil, nil
+		},
+	}
+	inboundInstance := &Inbound{
+		Adapter: inbound.NewAdapter(C.TypeCloudflared, "test"),
+		router:  router,
+	}
+	bridge := NewICMPBridge(inboundInstance, sender, icmpWireV3)
+
+	source := netip.MustParseAddr("2001:db8::2")
+	target := netip.MustParseAddr("2606:4700:4700::1111")
+	packet := buildIPv6ICMPPacket(source, target, icmpv6TypeEchoRequest, 0, 1, 1)
+	packet[7] = 1
+
+	if err := bridge.HandleV3(context.Background(), packet); err != nil {
+		t.Fatal(err)
+	}
+	if preMatchCalls != 0 {
+		t.Fatalf("expected TTL exceeded to bypass routing, got %d route lookups", preMatchCalls)
+	}
+	if len(sender.sent) != 1 {
+		t.Fatalf("expected one TTL exceeded reply, got %d", len(sender.sent))
+	}
+	if sender.sent[0][0] != byte(DatagramV3TypeICMP) {
+		t.Fatalf("expected v3 ICMP reply, got %d", sender.sent[0][0])
+	}
+	packetInfo, err := ParseICMPPacket(sender.sent[0][1:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if packetInfo.ICMPType != icmpv6TypeTimeExceeded || packetInfo.ICMPCode != 0 {
+		t.Fatalf("expected IPv6 time exceeded reply, got type=%d code=%d", packetInfo.ICMPType, packetInfo.ICMPCode)
+	}
+	if packetInfo.SourceIP != target || packetInfo.Destination != source {
+		t.Fatalf("unexpected TTL exceeded routing: src=%s dst=%s", packetInfo.SourceIP, packetInfo.Destination)
+	}
+}
+
 func TestICMPBridgeDropsNonEcho(t *testing.T) {
 	var preMatchCalls int
 	router := &testRouter{

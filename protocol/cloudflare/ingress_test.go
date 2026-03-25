@@ -162,3 +162,49 @@ func TestResolveHTTPServiceStatus(t *testing.T) {
 		t.Fatalf("status service should keep request URL, got %s", requestURL)
 	}
 }
+
+func TestParseResolvedServiceCanonicalizesWebSocketOrigin(t *testing.T) {
+	testCases := []struct {
+		rawService string
+		wantScheme string
+	}{
+		{rawService: "ws://127.0.0.1:8080", wantScheme: "http"},
+		{rawService: "wss://127.0.0.1:8443", wantScheme: "https"},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.rawService, func(t *testing.T) {
+			service, err := parseResolvedService(testCase.rawService, defaultOriginRequestConfig())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if service.BaseURL == nil {
+				t.Fatal("expected base URL")
+			}
+			if service.BaseURL.Scheme != testCase.wantScheme {
+				t.Fatalf("expected scheme %q, got %q", testCase.wantScheme, service.BaseURL.Scheme)
+			}
+			if service.Service != testCase.rawService {
+				t.Fatalf("expected raw service to stay %q, got %q", testCase.rawService, service.Service)
+			}
+		})
+	}
+}
+
+func TestResolveHTTPServiceWebSocketOrigin(t *testing.T) {
+	inboundInstance := newTestIngressInbound(t)
+	inboundInstance.configManager.activeConfig = RuntimeConfig{
+		Ingress: []compiledIngressRule{
+			{Hostname: "foo.com", Service: mustResolvedService(t, "ws://127.0.0.1:8083")},
+			{Service: mustResolvedService(t, "http_status:404")},
+		},
+	}
+
+	_, requestURL, err := inboundInstance.resolveHTTPService("https://foo.com/path?q=1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requestURL != "http://127.0.0.1:8083/path?q=1" {
+		t.Fatalf("expected websocket origin to be canonicalized, got %s", requestURL)
+	}
+}

@@ -74,6 +74,20 @@ func (s ResolvedService) BuildRequestURL(requestURL string) (string, error) {
 	}
 }
 
+func canonicalizeHTTPOriginURL(parsedURL *url.URL) *url.URL {
+	if parsedURL == nil {
+		return nil
+	}
+	canonicalURL := *parsedURL
+	switch canonicalURL.Scheme {
+	case "ws":
+		canonicalURL.Scheme = "http"
+	case "wss":
+		canonicalURL.Scheme = "https"
+	}
+	return &canonicalURL
+}
+
 type compiledIngressRule struct {
 	Hostname         string
 	PunycodeHostname string
@@ -451,7 +465,7 @@ func parseResolvedService(rawService string, originRequest OriginRequestConfig) 
 			Kind:          ResolvedServiceHTTP,
 			Service:       rawService,
 			Destination:   parseServiceDestination(parsedURL),
-			BaseURL:       parsedURL,
+			BaseURL:       canonicalizeHTTPOriginURL(parsedURL),
 			OriginRequest: originRequest,
 		}, nil
 	case "tcp", "ssh", "rdp", "smb":
