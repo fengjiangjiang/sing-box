@@ -80,10 +80,6 @@ func (c *closeableQUICConn) CloseWithError(code quic.ApplicationErrorCode, reaso
 	return err
 }
 
-var (
-	quicPortByConnIndex = make(map[uint8]int)
-	quicPortAccess      sync.Mutex
-)
 
 // NewQUICConnection dials the edge and establishes a QUIC connection.
 func NewQUICConnection(
@@ -96,7 +92,7 @@ func NewQUICConnection(
 	features []string,
 	numPreviousAttempts uint8,
 	gracePeriod time.Duration,
-	controlDialer N.Dialer,
+	tunnelDialer N.Dialer,
 	onConnected func(),
 	logger log.ContextLogger,
 ) (*QUICConnection, error) {
@@ -121,7 +117,7 @@ func NewQUICConnection(
 		InitialPacketSize:     quicInitialPacketSize(edgeAddr.IPVersion),
 	}
 
-	udpConn, err := createUDPConnForConnIndex(ctx, connIndex, edgeAddr, controlDialer)
+	udpConn, err := createUDPConnForConnIndex(ctx, edgeAddr, tunnelDialer)
 	if err != nil {
 		return nil, E.Cause(err, "listen UDP for QUIC edge")
 	}
@@ -147,11 +143,15 @@ func NewQUICConnection(
 	}, nil
 }
 
-func createUDPConnForConnIndex(ctx context.Context, connIndex uint8, edgeAddr *EdgeAddr, controlDialer N.Dialer) (*net.UDPConn, error) {
-	quicPortAccess.Lock()
-	defer quicPortAccess.Unlock()
-
-	packetConn, err := controlDialer.ListenPacket(ctx, M.SocksaddrFrom(edgeAddr.UDP.AddrPort().Addr(), edgeAddr.UDP.AddrPort().Port()))
+// createUDPConnForConnIndex creates a UDP socket for QUIC via the tunnel dialer.
+// Unlike cloudflared, we do not attempt to reuse previously-bound ports across
+// reconnects — the dialer interface does not support specifying local ports,
+// and fixed port binding is not important for our use case.
+// We also do not apply Darwin-specific udp4/udp6 network selection to work around
+// quic-go#3793 (DF bit on macOS dual-stack); the dialer controls network selection
+// and this is a non-critical platform-specific limitation.
+func createUDPConnForConnIndex(ctx context.Context, edgeAddr *EdgeAddr, tunnelDialer N.Dialer) (*net.UDPConn, error) {
+	packetConn, err := tunnelDialer.ListenPacket(ctx, M.SocksaddrFrom(edgeAddr.UDP.AddrPort().Addr(), edgeAddr.UDP.AddrPort().Port()))
 	if err != nil {
 		return nil, err
 	}
@@ -160,12 +160,6 @@ func createUDPConnForConnIndex(ctx context.Context, connIndex uint8, edgeAddr *E
 		packetConn.Close()
 		return nil, fmt.Errorf("unexpected packet conn type %T", packetConn)
 	}
-	udpAddr, ok := udpConn.LocalAddr().(*net.UDPAddr)
-	if !ok {
-		udpConn.Close()
-		return nil, fmt.Errorf("unexpected local UDP address type %T", udpConn.LocalAddr())
-	}
-	quicPortByConnIndex[connIndex] = udpAddr.Port
 	return udpConn, nil
 }
 
@@ -368,9 +362,11 @@ type DatagramSender interface {
 	SendDatagram(data []byte) error
 }
 
-// streamReadWriteCloser adapts a *quic.Stream to io.ReadWriteCloser.
+// streamReadWriteCloser adapts a *quic.Stream to io.ReadWriteCloser
+// with mutex-protected writes and safe close semantics.
 type streamReadWriteCloser struct {
-	stream *quic.Stream
+	stream      *quic.Stream
+	writeAccess sync.Mutex
 }
 
 func newStreamReadWriteCloser(stream *quic.Stream) *streamReadWriteCloser {
@@ -382,10 +378,15 @@ func (s *streamReadWriteCloser) Read(p []byte) (int, error) {
 }
 
 func (s *streamReadWriteCloser) Write(p []byte) (int, error) {
+	s.writeAccess.Lock()
+	defer s.writeAccess.Unlock()
 	return s.stream.Write(p)
 }
 
 func (s *streamReadWriteCloser) Close() error {
+	_ = s.stream.SetWriteDeadline(time.Now())
+	s.writeAccess.Lock()
+	defer s.writeAccess.Unlock()
 	s.stream.CancelRead(0)
 	return s.stream.Close()
 }

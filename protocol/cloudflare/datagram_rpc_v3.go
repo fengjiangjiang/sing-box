@@ -10,8 +10,6 @@ import (
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/protocol/cloudflare/tunnelrpc"
 	E "github.com/sagernet/sing/common/exceptions"
-
-	"zombiezen.com/go/capnproto2/rpc"
 )
 
 var (
@@ -63,8 +61,8 @@ func ServeV3RPCStream(ctx context.Context, stream io.ReadWriteCloser, inbound *I
 		logger:  logger,
 	}
 	client := tunnelrpc.CloudflaredServer_ServerToClient(srv)
-	transport := rpc.StreamTransport(stream)
-	rpcConn := rpc.NewConn(transport, rpc.MainInterface(client.Client))
+	transport := safeTransport(stream)
+	rpcConn := newRPCServerConn(transport, client.Client)
 	<-rpcConn.Done()
 	E.Errors(
 		rpcConn.Close(),

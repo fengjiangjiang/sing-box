@@ -76,8 +76,8 @@ var newV2SessionRPCClient = func(ctx context.Context, sender DatagramSender) (v2
 	if err != nil {
 		return nil, err
 	}
-	transport := rpc.StreamTransport(stream)
-	conn := rpc.NewConn(transport)
+	transport := safeTransport(stream)
+	conn := newRPCClientConn(transport, ctx)
 	return &capnpV2SessionRPCClient{
 		client:    tunnelrpc.SessionManager{Client: conn.Bootstrap(ctx)},
 		rpcConn:   conn,
@@ -533,8 +533,8 @@ func ServeRPCStream(ctx context.Context, stream io.ReadWriteCloser, inbound *Inb
 		logger:  logger,
 	}
 	client := tunnelrpc.CloudflaredServer_ServerToClient(srv)
-	transport := rpc.StreamTransport(stream)
-	rpcConn := rpc.NewConn(transport, rpc.MainInterface(client.Client))
+	transport := safeTransport(stream)
+	rpcConn := newRPCServerConn(transport, client.Client)
 	<-rpcConn.Done()
 	E.Errors(
 		rpcConn.Close(),

@@ -78,7 +78,7 @@ func NewHTTP2Connection(
 		ServerName: h2EdgeSNI,
 	}
 
-	tcpConn, err := inbound.controlDialer.DialContext(ctx, "tcp", M.SocksaddrFrom(edgeAddr.TCP.AddrPort().Addr(), edgeAddr.TCP.AddrPort().Port()))
+	tcpConn, err := inbound.tunnelDialer.DialContext(ctx, "tcp", M.SocksaddrFrom(edgeAddr.TCP.AddrPort().Addr(), edgeAddr.TCP.AddrPort().Port()))
 	if err != nil {
 		return nil, E.Cause(err, "dial edge TCP")
 	}

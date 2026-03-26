@@ -7,6 +7,7 @@ type CloudflaredInboundOptions struct {
 	HAConnections   int                `json:"ha_connections,omitempty"`
 	Protocol        string             `json:"protocol,omitempty"`
 	ControlDialer   DialerOptions      `json:"control_dialer,omitempty"`
+	TunnelDialer    DialerOptions      `json:"tunnel_dialer,omitempty"`
 	EdgeIPVersion   int                `json:"edge_ip_version,omitempty"`
 	DatagramVersion string             `json:"datagram_version,omitempty"`
 	GracePeriod     badoption.Duration `json:"grace_period,omitempty"`

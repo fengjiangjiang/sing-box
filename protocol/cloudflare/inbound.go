@@ -49,6 +49,7 @@ type Inbound struct {
 	flowLimiter     *FlowLimiter
 	accessCache     *accessValidatorCache
 	controlDialer   N.Dialer
+	tunnelDialer    N.Dialer
 
 	connectionAccess sync.Mutex
 	connections      []io.Closer
@@ -110,6 +111,13 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 	if err != nil {
 		return nil, E.Cause(err, "build cloudflared control dialer")
 	}
+	tunnelDialer, err := boxDialer.NewWithOptions(boxDialer.Options{
+		Context: ctx,
+		Options: options.TunnelDialer,
+	})
+	if err != nil {
+		return nil, E.Cause(err, "build cloudflared tunnel dialer")
+	}
 
 	region := options.Region
 	if region != "" && credentials.Endpoint != "" {
@@ -140,6 +148,7 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 		flowLimiter:       &FlowLimiter{},
 		accessCache:       &accessValidatorCache{values: make(map[string]accessValidator), dialer: controlDialer},
 		controlDialer:     controlDialer,
+		tunnelDialer:      tunnelDialer,
 		datagramV2Muxers:  make(map[DatagramSender]*DatagramV2Muxer),
 		datagramV3Muxers:  make(map[DatagramSender]*DatagramV3Muxer),
 		datagramV3Manager: NewDatagramV3SessionManager(),
@@ -310,7 +319,7 @@ func (i *Inbound) serveQUIC(connIndex uint8, edgeAddr *EdgeAddr, datagramVersion
 	connection, err := NewQUICConnection(
 		i.ctx, edgeAddr, connIndex,
 		i.credentials, i.connectorID, datagramVersion,
-		features, numPreviousAttempts, i.gracePeriod, i.controlDialer, func() {
+		features, numPreviousAttempts, i.gracePeriod, i.tunnelDialer, func() {
 			i.notifyConnected(connIndex)
 		}, i.logger,
 	)
