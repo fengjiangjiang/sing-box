@@ -6,6 +6,7 @@ icon: material/new-box
 
     :material-plus: [account_key](#account_key)  
     :material-plus: [key_type](#key_type)  
+    :material-plus: [profile](#profile)  
     :material-plus: [detour](#detour)
 
 # ACME
@@ -37,6 +38,7 @@ icon: material/new-box
   },
   "dns01_challenge": {},
   "key_type": "",
+  "profile": "",
   "detour": ""
 }
 ```
@@ -135,6 +137,16 @@ ACME DNS01 质询字段。如果配置，将禁用其他质询方法。
 | `p384`    | P-384   |
 | `rsa2048` | RSA     |
 | `rsa4096` | RSA     |
+
+#### profile
+
+!!! question "自 sing-box 1.14.0 起"
+
+用于证书订单的 ACME 配置文件名称。
+
+参阅 [ACME Profiles](https://datatracker.ietf.org/doc/draft-aaron-acme-profiles/)。
+
+当使用 Let's Encrypt 且包含 IP 地址标识符时，如果未设置，将自动选择 `shortlived` 配置文件。
 
 #### detour
 

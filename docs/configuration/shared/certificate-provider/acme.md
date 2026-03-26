@@ -6,6 +6,7 @@ icon: material/new-box
 
     :material-plus: [account_key](#account_key)  
     :material-plus: [key_type](#key_type)  
+    :material-plus: [profile](#profile)  
     :material-plus: [detour](#detour)
 
 # ACME
@@ -37,6 +38,7 @@ icon: material/new-box
   },
   "dns01_challenge": {},
   "key_type": "",
+  "profile": "",
   "detour": ""
 }
 ```
@@ -140,6 +142,16 @@ The private key type to generate for new certificates.
 | `p384`     | P-384   |
 | `rsa2048`  | RSA     |
 | `rsa4096`  | RSA     |
+
+#### profile
+
+!!! question "Since sing-box 1.14.0"
+
+The ACME profile name to use for certificate orders.
+
+See [ACME Profiles](https://datatracker.ietf.org/doc/draft-aaron-acme-profiles/) for details.
+
+When using Let's Encrypt with IP address identifiers, the `shortlived` profile is automatically selected if not set.
 
 #### detour
 
