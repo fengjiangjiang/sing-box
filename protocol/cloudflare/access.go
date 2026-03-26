@@ -56,17 +56,21 @@ func (v *oidcAccessValidator) Validate(ctx context.Context, request *http.Reques
 	if err != nil {
 		return err
 	}
-	if len(v.audTags) == 0 {
+	if accessTokenAudienceAllowed(token.Audience, v.audTags) {
 		return nil
 	}
-	for _, jwtAudTag := range token.Audience {
-		for _, acceptedAudTag := range v.audTags {
-			if acceptedAudTag == jwtAudTag {
-				return nil
+	return E.New("access token audience does not match configured aud_tag")
+}
+
+func accessTokenAudienceAllowed(tokenAudience []string, configuredAudTags []string) bool {
+	for _, tokenAudTag := range tokenAudience {
+		for _, configuredAudTag := range configuredAudTags {
+			if configuredAudTag == tokenAudTag {
+				return true
 			}
 		}
 	}
-	return E.New("access token audience does not match configured aud_tag")
+	return false
 }
 
 func accessIssuerURL(teamName string, environment string) string {

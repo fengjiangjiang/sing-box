@@ -411,6 +411,13 @@ type http2ResponseWriter struct {
 	headersSent bool
 }
 
+func (w *http2ResponseWriter) AddTrailer(name, value string) {
+	if !w.headersSent {
+		return
+	}
+	w.writer.Header().Add(http2.TrailerPrefix+name, value)
+}
+
 func (w *http2ResponseWriter) WriteResponse(responseError error, metadata []Metadata) error {
 	if w.headersSent {
 		return nil

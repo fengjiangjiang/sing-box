@@ -34,12 +34,17 @@ const (
 var (
 	loadOriginCABasePool = cloudflareRootCertPool
 	readOriginCAFile     = os.ReadFile
+	proxyFromEnvironment = http.ProxyFromEnvironment
 )
 
 // ConnectResponseWriter abstracts the response writing for both QUIC and HTTP/2.
 type ConnectResponseWriter interface {
 	// WriteResponse sends the connect response (ack or error) with optional metadata.
 	WriteResponse(responseError error, metadata []Metadata) error
+}
+
+type connectResponseTrailerWriter interface {
+	AddTrailer(name, value string)
 }
 
 // quicResponseWriter writes ConnectResponse in QUIC data stream format (signature + capnp).
@@ -69,8 +74,13 @@ func (i *Inbound) HandleRPCStream(ctx context.Context, stream io.ReadWriteCloser
 
 // HandleRPCStreamWithSender handles an RPC stream with access to the DatagramSender for V2 muxer lookup.
 func (i *Inbound) HandleRPCStreamWithSender(ctx context.Context, stream io.ReadWriteCloser, connIndex uint8, sender DatagramSender) {
-	muxer := i.getOrCreateV2Muxer(sender)
-	ServeRPCStream(ctx, stream, i, muxer, i.logger)
+	switch datagramVersionForSender(sender) {
+	case "v3":
+		ServeV3RPCStream(ctx, stream, i, i.logger)
+	default:
+		muxer := i.getOrCreateV2Muxer(sender)
+		ServeRPCStream(ctx, stream, i, muxer, i.logger)
+	}
 }
 
 // HandleDatagram handles an incoming QUIC datagram.
@@ -401,6 +411,13 @@ func (i *Inbound) roundTripHTTP(ctx context.Context, stream io.ReadWriteCloser, 
 	if err != nil && !E.IsClosedOrCanceled(err) {
 		i.logger.DebugContext(ctx, "copy HTTP response body: ", err)
 	}
+	if trailerWriter, ok := respWriter.(connectResponseTrailerWriter); ok {
+		for name, values := range response.Trailer {
+			for _, value := range values {
+				trailerWriter.AddTrailer(name, value)
+			}
+		}
+	}
 }
 
 func (i *Inbound) newRouterOriginTransport(ctx context.Context, metadata adapter.InboundContext, originRequest OriginRequestConfig, requestHost string) (*http.Transport, func(), error) {
@@ -417,7 +434,7 @@ func (i *Inbound) newRouterOriginTransport(ctx context.Context, metadata adapter
 		IdleConnTimeout:     originRequest.KeepAliveTimeout,
 		MaxIdleConns:        originRequest.KeepAliveConnections,
 		MaxIdleConnsPerHost: originRequest.KeepAliveConnections,
-		Proxy:               http.ProxyFromEnvironment,
+		Proxy:               proxyFromEnvironment,
 		TLSClientConfig:     tlsConfig,
 		DialContext: func(_ context.Context, _, _ string) (net.Conn, error) {
 			return input, nil
@@ -445,7 +462,7 @@ func (i *Inbound) newDirectOriginTransport(service ResolvedService, requestHost 
 		IdleConnTimeout:     service.OriginRequest.KeepAliveTimeout,
 		MaxIdleConns:        service.OriginRequest.KeepAliveConnections,
 		MaxIdleConnsPerHost: service.OriginRequest.KeepAliveConnections,
-		Proxy:               http.ProxyFromEnvironment,
+		Proxy:               proxyFromEnvironment,
 		TLSClientConfig:     tlsConfig,
 	}
 	switch service.Kind {

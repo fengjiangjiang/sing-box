@@ -474,12 +474,18 @@ func (s *cloudflaredServer) RegisterUdpSession(call tunnelrpc.SessionManager_reg
 
 	destinationPort := call.Params.DstPort()
 	closeAfterIdle := time.Duration(call.Params.CloseAfterIdleHint())
+	if _, traceErr := call.Params.TraceContext(); traceErr != nil {
+		return traceErr
+	}
 
 	err = s.muxer.RegisterSession(s.ctx, sessionID, net.IP(destinationIP), destinationPort, closeAfterIdle)
 
 	result, allocErr := call.Results.NewResult()
 	if allocErr != nil {
 		return allocErr
+	}
+	if spansErr := result.SetSpans([]byte{}); spansErr != nil {
+		return spansErr
 	}
 	if err != nil {
 		result.SetErr(err.Error())

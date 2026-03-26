@@ -131,7 +131,13 @@ func TestNewOriginTLSConfigAppendsCustomCAInsteadOfReplacingBasePool(t *testing.
 }
 
 func TestOriginTransportUsesProxyFromEnvironmentOnly(t *testing.T) {
-	t.Setenv("HTTP_PROXY", "http://proxy.example.com:8080")
+	originalProxyFromEnvironment := proxyFromEnvironment
+	proxyFromEnvironment = func(request *http.Request) (*url.URL, error) {
+		return url.Parse("http://proxy.example.com:8080")
+	}
+	defer func() {
+		proxyFromEnvironment = originalProxyFromEnvironment
+	}()
 
 	inbound := &Inbound{}
 	transport, cleanup, err := inbound.newDirectOriginTransport(ResolvedService{

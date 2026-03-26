@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/sagernet/quic-go"
@@ -262,7 +263,7 @@ func (q *QUICConnection) handleStream(ctx context.Context, stream *quic.Stream, 
 			q.logger.Debug("failed to read connect request: ", err)
 			return
 		}
-		handler.HandleDataStream(ctx, rwc, request, q.connIndex)
+		handler.HandleDataStream(ctx, &nopCloserReadWriter{ReadWriteCloser: rwc}, request, q.connIndex)
 
 	case StreamTypeRPC:
 		handler.HandleRPCStreamWithSender(ctx, rwc, q.connIndex, q)
@@ -387,4 +388,34 @@ func (s *streamReadWriteCloser) Write(p []byte) (int, error) {
 func (s *streamReadWriteCloser) Close() error {
 	s.stream.CancelRead(0)
 	return s.stream.Close()
+}
+
+// nopCloserReadWriter lets handlers stop consuming the read side without closing
+// the underlying stream write side. This matches cloudflared's QUIC HTTP behavior,
+// where the request body can be closed before the response is fully written.
+type nopCloserReadWriter struct {
+	io.ReadWriteCloser
+
+	sawEOF bool
+	closed uint32
+}
+
+func (n *nopCloserReadWriter) Read(p []byte) (int, error) {
+	if n.sawEOF {
+		return 0, io.EOF
+	}
+	if atomic.LoadUint32(&n.closed) > 0 {
+		return 0, fmt.Errorf("closed by handler")
+	}
+
+	readLen, err := n.ReadWriteCloser.Read(p)
+	if err == io.EOF {
+		n.sawEOF = true
+	}
+	return readLen, err
+}
+
+func (n *nopCloserReadWriter) Close() error {
+	atomic.StoreUint32(&n.closed, 1)
+	return nil
 }

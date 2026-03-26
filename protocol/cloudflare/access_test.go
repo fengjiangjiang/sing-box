@@ -50,6 +50,43 @@ func TestValidateAccessConfiguration(t *testing.T) {
 	}
 }
 
+func TestAccessTokenAudienceAllowed(t *testing.T) {
+	testCases := []struct {
+		name           string
+		tokenAudience  []string
+		configuredTags []string
+		expected       bool
+	}{
+		{
+			name:           "matching audience",
+			tokenAudience:  []string{"aud-1", "aud-2"},
+			configuredTags: []string{"aud-2"},
+			expected:       true,
+		},
+		{
+			name:           "empty configured tags rejected",
+			tokenAudience:  []string{"aud-1"},
+			configuredTags: nil,
+			expected:       false,
+		},
+		{
+			name:           "non matching audience rejected",
+			tokenAudience:  []string{"aud-1"},
+			configuredTags: []string{"aud-2"},
+			expected:       false,
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			allowed := accessTokenAudienceAllowed(testCase.tokenAudience, testCase.configuredTags)
+			if allowed != testCase.expected {
+				t.Fatalf("accessTokenAudienceAllowed(%v, %v) = %v, want %v", testCase.tokenAudience, testCase.configuredTags, allowed, testCase.expected)
+			}
+		})
+	}
+}
+
 func TestRoundTripHTTPAccessDenied(t *testing.T) {
 	originalFactory := newAccessValidator
 	defer func() {
