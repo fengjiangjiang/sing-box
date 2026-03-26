@@ -45,6 +45,7 @@ type ResolvedService struct {
 	Kind          ResolvedServiceKind
 	Service       string
 	Destination   M.Socksaddr
+	StreamHasPort bool
 	BaseURL       *url.URL
 	UnixPath      string
 	StatusCode    int
@@ -86,6 +87,15 @@ func canonicalizeHTTPOriginURL(parsedURL *url.URL) *url.URL {
 		canonicalURL.Scheme = "https"
 	}
 	return &canonicalURL
+}
+
+func isHTTPServiceScheme(scheme string) bool {
+	switch scheme {
+	case "http", "https", "ws", "wss":
+		return true
+	default:
+		return false
+	}
 }
 
 type compiledIngressRule struct {
@@ -459,35 +469,46 @@ func parseResolvedService(rawService string, originRequest OriginRequestConfig) 
 		return ResolvedService{}, E.New("ingress service cannot include a path: ", rawService)
 	}
 
-	switch parsedURL.Scheme {
-	case "http", "https", "ws", "wss":
+	if isHTTPServiceScheme(parsedURL.Scheme) {
 		return ResolvedService{
 			Kind:          ResolvedServiceHTTP,
 			Service:       rawService,
-			Destination:   parseServiceDestination(parsedURL),
+			Destination:   parseHTTPServiceDestination(parsedURL),
 			BaseURL:       canonicalizeHTTPOriginURL(parsedURL),
 			OriginRequest: originRequest,
 		}, nil
-	case "tcp", "ssh", "rdp", "smb":
-		return ResolvedService{
-			Kind:          ResolvedServiceStream,
-			Service:       rawService,
-			Destination:   parseServiceDestination(parsedURL),
-			BaseURL:       parsedURL,
-			OriginRequest: originRequest,
-		}, nil
-	default:
-		return ResolvedService{}, E.New("unsupported ingress service scheme: ", parsedURL.Scheme)
 	}
+
+	destination, hasPort := parseStreamServiceDestination(parsedURL)
+	return ResolvedService{
+		Kind:          ResolvedServiceStream,
+		Service:       rawService,
+		Destination:   destination,
+		StreamHasPort: hasPort,
+		BaseURL:       parsedURL,
+		OriginRequest: originRequest,
+	}, nil
 }
 
-func parseServiceDestination(parsedURL *url.URL) M.Socksaddr {
+func parseHTTPServiceDestination(parsedURL *url.URL) M.Socksaddr {
 	host := parsedURL.Hostname()
 	port := parsedURL.Port()
 	if port == "" {
 		switch parsedURL.Scheme {
 		case "https", "wss":
 			port = "443"
+		default:
+			port = "80"
+		}
+	}
+	return M.ParseSocksaddr(net.JoinHostPort(host, port))
+}
+
+func parseStreamServiceDestination(parsedURL *url.URL) (M.Socksaddr, bool) {
+	host := parsedURL.Hostname()
+	port := parsedURL.Port()
+	if port == "" {
+		switch parsedURL.Scheme {
 		case "ssh":
 			port = "22"
 		case "rdp":
@@ -497,10 +518,10 @@ func parseServiceDestination(parsedURL *url.URL) M.Socksaddr {
 		case "tcp":
 			port = "7864"
 		default:
-			port = "80"
+			return M.ParseSocksaddrHostPort(host, 0), false
 		}
 	}
-	return M.ParseSocksaddr(net.JoinHostPort(host, port))
+	return M.ParseSocksaddr(net.JoinHostPort(host, port)), true
 }
 
 func validateHostname(hostname string, isLast bool) error {

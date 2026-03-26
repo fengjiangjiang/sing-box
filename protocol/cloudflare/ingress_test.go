@@ -191,6 +191,67 @@ func TestParseResolvedServiceCanonicalizesWebSocketOrigin(t *testing.T) {
 	}
 }
 
+func TestParseResolvedServiceGenericStreamSchemeWithoutPort(t *testing.T) {
+	service, err := parseResolvedService("ftp://127.0.0.1", defaultOriginRequestConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if service.Kind != ResolvedServiceStream {
+		t.Fatalf("expected stream service, got %v", service.Kind)
+	}
+	if service.Destination.AddrString() != "127.0.0.1" {
+		t.Fatalf("expected destination host 127.0.0.1, got %s", service.Destination.AddrString())
+	}
+	if service.Destination.Port != 0 {
+		t.Fatalf("expected destination port 0, got %d", service.Destination.Port)
+	}
+	if service.StreamHasPort {
+		t.Fatal("expected generic stream service without port to report missing port")
+	}
+}
+
+func TestParseResolvedServiceGenericStreamSchemeWithPort(t *testing.T) {
+	service, err := parseResolvedService("ftp://127.0.0.1:21", defaultOriginRequestConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if service.Kind != ResolvedServiceStream {
+		t.Fatalf("expected stream service, got %v", service.Kind)
+	}
+	if service.Destination.String() != "127.0.0.1:21" {
+		t.Fatalf("expected destination 127.0.0.1:21, got %s", service.Destination)
+	}
+	if !service.StreamHasPort {
+		t.Fatal("expected generic stream service with explicit port to be dialable")
+	}
+}
+
+func TestParseResolvedServiceSSHDefaultPort(t *testing.T) {
+	service, err := parseResolvedService("ssh://127.0.0.1", defaultOriginRequestConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if service.Destination.String() != "127.0.0.1:22" {
+		t.Fatalf("expected destination 127.0.0.1:22, got %s", service.Destination)
+	}
+	if !service.StreamHasPort {
+		t.Fatal("expected ssh stream service to apply default port")
+	}
+}
+
+func TestParseResolvedServiceTCPDefaultPort(t *testing.T) {
+	service, err := parseResolvedService("tcp://127.0.0.1", defaultOriginRequestConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if service.Destination.String() != "127.0.0.1:7864" {
+		t.Fatalf("expected destination 127.0.0.1:7864, got %s", service.Destination)
+	}
+	if !service.StreamHasPort {
+		t.Fatal("expected tcp stream service to apply default port")
+	}
+}
+
 func TestResolveHTTPServiceWebSocketOrigin(t *testing.T) {
 	inboundInstance := newTestIngressInbound(t)
 	inboundInstance.configManager.activeConfig = RuntimeConfig{

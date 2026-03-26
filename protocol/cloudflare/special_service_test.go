@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"sync/atomic"
 	"testing"
@@ -439,8 +440,9 @@ func TestHandleStreamService(t *testing.T) {
 	go func() {
 		defer close(done)
 		inboundInstance.handleStreamService(context.Background(), serverSide, respWriter, request, adapter.InboundContext{}, ResolvedService{
-			Kind:        ResolvedServiceStream,
-			Destination: M.ParseSocksaddr(listener.Addr().String()),
+			Kind:          ResolvedServiceStream,
+			Destination:   M.ParseSocksaddr(listener.Addr().String()),
+			StreamHasPort: true,
 		})
 	}()
 
@@ -497,8 +499,9 @@ func TestHandleStreamServiceProxyTypeSocks(t *testing.T) {
 	go func() {
 		defer close(done)
 		inboundInstance.handleStreamService(context.Background(), serverSide, respWriter, request, adapter.InboundContext{}, ResolvedService{
-			Kind:        ResolvedServiceStream,
-			Destination: M.ParseSocksaddr(listener.Addr().String()),
+			Kind:          ResolvedServiceStream,
+			Destination:   M.ParseSocksaddr(listener.Addr().String()),
+			StreamHasPort: true,
 			OriginRequest: OriginRequestConfig{
 				ProxyType: "socks",
 			},
@@ -538,5 +541,102 @@ func TestHandleStreamServiceProxyTypeSocks(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("socks stream service did not exit")
+	}
+}
+
+func TestHandleStreamServiceGenericSchemeWithPort(t *testing.T) {
+	listener := startEchoListener(t)
+	defer listener.Close()
+
+	serverSide, clientSide := net.Pipe()
+	defer clientSide.Close()
+
+	inboundInstance := newSpecialServiceInbound(t)
+	request := &ConnectRequest{
+		Type: ConnectionTypeWebsocket,
+		Metadata: []Metadata{
+			{Key: metadataHTTPHeader + ":Sec-WebSocket-Key", Val: "dGhlIHNhbXBsZSBub25jZQ=="},
+		},
+	}
+	respWriter := &fakeConnectResponseWriter{done: make(chan struct{})}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		inboundInstance.handleStreamService(context.Background(), serverSide, respWriter, request, adapter.InboundContext{}, ResolvedService{
+			Kind:          ResolvedServiceStream,
+			Service:       "ftp://" + listener.Addr().String(),
+			Destination:   M.ParseSocksaddr(listener.Addr().String()),
+			StreamHasPort: true,
+		})
+	}()
+
+	select {
+	case <-respWriter.done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for stream service connect response")
+	}
+	if respWriter.err != nil {
+		t.Fatal(respWriter.err)
+	}
+	if respWriter.status != http.StatusSwitchingProtocols {
+		t.Fatalf("expected 101 response, got %d", respWriter.status)
+	}
+
+	if err := wsutil.WriteClientMessage(clientSide, ws.OpBinary, []byte("hello")); err != nil {
+		t.Fatal(err)
+	}
+	data, _, err := wsutil.ReadServerData(clientSide)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "hello" {
+		t.Fatalf("expected echoed payload, got %q", string(data))
+	}
+	_ = clientSide.Close()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("generic stream service did not exit")
+	}
+}
+
+func TestHandleStreamServiceGenericSchemeWithoutPort(t *testing.T) {
+	serverSide, clientSide := net.Pipe()
+	defer clientSide.Close()
+	defer serverSide.Close()
+
+	router := &countingRouter{}
+	inboundInstance := newSpecialServiceInboundWithRouter(t, router)
+	request := &ConnectRequest{
+		Type: ConnectionTypeWebsocket,
+		Metadata: []Metadata{
+			{Key: metadataHTTPHeader + ":Sec-WebSocket-Key", Val: "dGhlIHNhbXBsZSBub25jZQ=="},
+		},
+	}
+	respWriter := &fakeConnectResponseWriter{done: make(chan struct{})}
+
+	inboundInstance.handleStreamService(context.Background(), serverSide, respWriter, request, adapter.InboundContext{}, ResolvedService{
+		Kind:          ResolvedServiceStream,
+		Service:       "ftp://127.0.0.1",
+		Destination:   M.ParseSocksaddrHostPort("127.0.0.1", 0),
+		StreamHasPort: false,
+		BaseURL: &url.URL{
+			Scheme: "ftp",
+			Host:   "127.0.0.1",
+		},
+	})
+
+	if respWriter.err == nil {
+		t.Fatal("expected missing port error")
+	}
+	if respWriter.err.Error() != "address 127.0.0.1: missing port in address" {
+		t.Fatalf("unexpected error: %v", respWriter.err)
+	}
+	if respWriter.status == http.StatusSwitchingProtocols {
+		t.Fatalf("expected non-upgrade response on error, got %d", respWriter.status)
+	}
+	if router.count.Load() != 0 {
+		t.Fatalf("expected router not to be used, got %d", router.count.Load())
 	}
 }

@@ -276,6 +276,11 @@ func (i *Inbound) superviseConnection(connIndex uint8, edgeAddrs []*EdgeAddr) {
 
 func (i *Inbound) serveConnection(connIndex uint8, edgeAddr *EdgeAddr, numPreviousAttempts uint8) error {
 	protocol := i.protocol
+	// An empty protocol means the user configured "auto". For the token-provided,
+	// remotely-managed tunnel mode we implement here, that intentionally matches
+	// cloudflared's token path: start with QUIC and fall back to HTTP/2 on failure.
+	// If we ever support non-token/local-config modes, that is where remote
+	// percentage-based protocol selection should be introduced.
 	if protocol == "" {
 		protocol = "quic"
 	}
@@ -423,6 +428,11 @@ func parseToken(token string) (Credentials, error) {
 	return tunnelToken.ToCredentials(), nil
 }
 
+// "auto" does not choose a transport here. We normalize it to an empty
+// sentinel so serveConnection can apply the token-style behavior later.
+// In the token-provided, remotely-managed tunnel path supported here, that
+// matches cloudflared's NewProtocolSelector(..., tunnelTokenProvided=true)
+// branch rather than the non-token remote-percentage selector.
 func normalizeProtocol(protocol string) (string, error) {
 	if protocol == "auto" {
 		return "", nil

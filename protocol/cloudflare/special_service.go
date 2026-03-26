@@ -42,6 +42,10 @@ func (i *Inbound) handleBastionStream(ctx context.Context, stream io.ReadWriteCl
 }
 
 func (i *Inbound) handleStreamService(ctx context.Context, stream io.ReadWriteCloser, respWriter ConnectResponseWriter, request *ConnectRequest, metadata adapter.InboundContext, service ResolvedService) {
+	if !service.StreamHasPort {
+		respWriter.WriteResponse(E.New("address ", streamServiceHostname(service), ": missing port in address"), nil)
+		return
+	}
 	i.handleRouterBackedStream(ctx, stream, respWriter, request, service.Destination, service.OriginRequest.ProxyType)
 }
 
@@ -179,6 +183,17 @@ func requestHeaderValue(request *ConnectRequest, headerName string) string {
 		}
 	}
 	return ""
+}
+
+func streamServiceHostname(service ResolvedService) string {
+	if service.BaseURL != nil && service.BaseURL.Hostname() != "" {
+		return service.BaseURL.Hostname()
+	}
+	parsedURL, err := url.Parse(service.Service)
+	if err == nil && parsedURL.Hostname() != "" {
+		return parsedURL.Hostname()
+	}
+	return service.Destination.AddrString()
 }
 
 func (i *Inbound) dialRouterTCP(ctx context.Context, destination M.Socksaddr) (net.Conn, func(), error) {
