@@ -379,6 +379,18 @@ func TestBuildICMPTTLExceededPacketUsesRFCQuoteLengths(t *testing.T) {
 	}
 }
 
+func TestEncodeV3ICMPDatagramRejectsEmptyPayload(t *testing.T) {
+	if _, err := encodeV3ICMPDatagram(nil); err == nil {
+		t.Fatal("expected empty payload to be rejected")
+	}
+}
+
+func TestEncodeV3ICMPDatagramRejectsOversizedPayload(t *testing.T) {
+	if _, err := encodeV3ICMPDatagram(make([]byte, maxICMPPayloadLen+1)); err == nil {
+		t.Fatal("expected oversized payload to be rejected")
+	}
+}
+
 func TestICMPBridgeCleanupExpired(t *testing.T) {
 	bridge := NewICMPBridge(&Inbound{}, &captureDatagramSender{}, icmpWireV2)
 	now := time.Now()

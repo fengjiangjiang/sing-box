@@ -4,7 +4,6 @@ package cloudflare
 
 import (
 	"context"
-	"crypto/tls"
 	"fmt"
 	"io"
 	"net"
@@ -54,6 +53,7 @@ type QUICConnection struct {
 	registrationResult  *RegistrationResult
 	onConnected         func()
 
+	serveCtx          context.Context
 	serveCancel       context.CancelFunc
 	registrationClose sync.Once
 	shutdownOnce      sync.Once
@@ -109,11 +109,7 @@ func NewQUICConnection(
 		return nil, E.Cause(err, "load Cloudflare root CAs")
 	}
 
-	tlsConfig := &tls.Config{
-		RootCAs:    rootCAs,
-		ServerName: quicEdgeSNI,
-		NextProtos: []string{quicEdgeALPN},
-	}
+	tlsConfig := newEdgeTLSConfig(rootCAs, quicEdgeSNI, []string{quicEdgeALPN})
 
 	quicConfig := &quic.Config{
 		HandshakeIdleTimeout:  quicHandshakeIdleTimeout,
@@ -190,6 +186,7 @@ func (q *QUICConnection) Serve(ctx context.Context, handler StreamHandler) error
 		" (connection ", q.registrationResult.ConnectionID, ")")
 
 	serveCtx, serveCancel := context.WithCancel(context.WithoutCancel(ctx))
+	q.serveCtx = serveCtx
 	q.serveCancel = serveCancel
 
 	errChan := make(chan error, 2)
@@ -321,9 +318,16 @@ func (q *QUICConnection) gracefulShutdown() {
 		}
 		q.closeRegistrationClient()
 		if q.gracePeriod > 0 {
+			waitCtx := q.serveCtx
+			if waitCtx == nil {
+				waitCtx = context.Background()
+			}
 			timer := time.NewTimer(q.gracePeriod)
-			<-timer.C
-			timer.Stop()
+			defer timer.Stop()
+			select {
+			case <-timer.C:
+			case <-waitCtx.Done():
+			}
 		}
 		q.closeNow("graceful shutdown")
 	})

@@ -10,6 +10,7 @@ import (
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/protocol/cloudflare/tunnelrpc"
 	E "github.com/sagernet/sing/common/exceptions"
+	"zombiezen.com/go/capnproto2/server"
 )
 
 var (
@@ -38,6 +39,7 @@ func (s *cloudflaredV3Server) UnregisterUdpSession(call tunnelrpc.SessionManager
 }
 
 func (s *cloudflaredV3Server) UpdateConfiguration(call tunnelrpc.ConfigurationManager_updateConfiguration) error {
+	server.Ack(call.Options)
 	version := call.Params.Version()
 	configData, _ := call.Params.Config()
 	updateResult := s.inbound.ApplyConfig(version, configData)

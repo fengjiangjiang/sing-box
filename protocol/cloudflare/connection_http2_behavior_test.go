@@ -3,6 +3,7 @@
 package cloudflare
 
 import (
+	"bytes"
 	"io"
 	"net/http"
 	"testing"
@@ -163,5 +164,28 @@ func TestHTTP2DataStreamWriteRecoversPanic(t *testing.T) {
 	_, err := stream.Write([]byte("panic"))
 	if err != io.ErrClosedPipe {
 		t.Fatalf("expected io.ErrClosedPipe, got %v", err)
+	}
+}
+
+func TestHandleConfigurationUpdateDecodeFailureReturnsBadGateway(t *testing.T) {
+	writer := &captureHTTP2Writer{}
+	connection := &HTTP2Connection{
+		logger: log.NewNOPFactory().NewLogger("test"),
+	}
+	request, err := http.NewRequest(http.MethodPost, "https://example.com", bytes.NewBufferString("{"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	connection.handleConfigurationUpdate(request, writer)
+
+	if writer.statusCode != http.StatusBadGateway {
+		t.Fatalf("expected status %d, got %d", http.StatusBadGateway, writer.statusCode)
+	}
+	if meta := writer.Header().Get(h2HeaderResponseMeta); meta != h2ResponseMetaCloudflared {
+		t.Fatalf("unexpected response meta: %q", meta)
+	}
+	if len(writer.body) != 0 {
+		t.Fatalf("expected empty response body, got %q", string(writer.body))
 	}
 }

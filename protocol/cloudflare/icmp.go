@@ -24,6 +24,7 @@ const (
 	icmpErrorHeaderLen      = 8
 	ipv4TTLExceededQuoteLen = 548
 	ipv6TTLExceededQuoteLen = 1232
+	maxICMPPayloadLen       = 1280
 
 	icmpv4TypeEchoRequest  = 8
 	icmpv4TypeEchoReply    = 0
@@ -519,7 +520,7 @@ func encodeICMPDatagram(packet []byte, wireVersion icmpWireVersion, traceContext
 	case icmpWireV2:
 		return encodeV2ICMPDatagram(packet, traceContext)
 	case icmpWireV3:
-		return encodeV3ICMPDatagram(packet), nil
+		return encodeV3ICMPDatagram(packet)
 	default:
 		return nil, E.New("unsupported icmp wire version: ", wireVersion)
 	}
@@ -562,9 +563,15 @@ func encodeV2ICMPDatagram(packet []byte, _ ICMPTraceContext) ([]byte, error) {
 	return data, nil
 }
 
-func encodeV3ICMPDatagram(packet []byte) []byte {
+func encodeV3ICMPDatagram(packet []byte) ([]byte, error) {
+	if len(packet) == 0 {
+		return nil, E.New("icmp payload is missing")
+	}
+	if len(packet) > maxICMPPayloadLen {
+		return nil, E.New("icmp payload is too large")
+	}
 	data := make([]byte, 0, len(packet)+1)
 	data = append(data, byte(DatagramV3TypeICMP))
 	data = append(data, packet...)
-	return data
+	return data, nil
 }

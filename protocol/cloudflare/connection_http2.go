@@ -83,10 +83,7 @@ func NewHTTP2Connection(
 		return nil, E.Cause(err, "load Cloudflare root CAs")
 	}
 
-	tlsConfig := &tls.Config{
-		RootCAs:    rootCAs,
-		ServerName: h2EdgeSNI,
-	}
+	tlsConfig := newEdgeTLSConfig(rootCAs, h2EdgeSNI, nil)
 
 	tcpConn, err := inbound.tunnelDialer.DialContext(ctx, "tcp", M.SocksaddrFrom(edgeAddr.TCP.AddrPort().Addr(), edgeAddr.TCP.AddrPort().Port()))
 	if err != nil {
@@ -283,7 +280,8 @@ func (c *HTTP2Connection) handleConfigurationUpdate(r *http.Request, w http.Resp
 	err := json.NewDecoder(r.Body).Decode(&body)
 	if err != nil {
 		c.logger.Error("decode configuration update: ", err)
-		w.WriteHeader(http.StatusBadRequest)
+		w.Header().Set(h2HeaderResponseMeta, h2ResponseMetaCloudflared)
+		w.WriteHeader(http.StatusBadGateway)
 		return
 	}
 	result := c.inbound.ApplyConfig(body.Version, body.Config)

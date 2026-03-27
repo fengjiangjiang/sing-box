@@ -21,6 +21,7 @@ import (
 	"github.com/sagernet/sing-box/option"
 	E "github.com/sagernet/sing/common/exceptions"
 	"github.com/sagernet/sing/common/json"
+	"github.com/sagernet/sing/common/json/badoption"
 	N "github.com/sagernet/sing/common/network"
 
 	"github.com/google/uuid"
@@ -91,6 +92,26 @@ type connectionState struct {
 	retries  uint8
 }
 
+func resolveGracePeriod(value *badoption.Duration) time.Duration {
+	if value == nil {
+		return 30 * time.Second
+	}
+	return time.Duration(*value)
+}
+
+func connectionRetryDecision(err error) (retry bool, cancelAll bool) {
+	switch {
+	case err == nil:
+		return false, false
+	case errors.Is(err, ErrNonRemoteManagedTunnelUnsupported):
+		return false, true
+	case isPermanentRegistrationError(err):
+		return false, false
+	default:
+		return true, false
+	}
+}
+
 func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.CloudflaredInboundOptions) (adapter.Inbound, error) {
 	if options.Token == "" {
 		return nil, E.New("missing token")
@@ -120,10 +141,7 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 		return nil, E.New("unsupported datagram_version: ", datagramVersion, ", expected v2 or v3")
 	}
 
-	gracePeriod := time.Duration(options.GracePeriod)
-	if gracePeriod == 0 {
-		gracePeriod = 30 * time.Second
-	}
+	gracePeriod := resolveGracePeriod(options.GracePeriod)
 
 	configManager, err := NewConfigManager()
 	if err != nil {
@@ -308,9 +326,14 @@ func (i *Inbound) superviseConnection(connIndex uint8, edgeAddrs []*EdgeAddr) {
 		if err == nil || i.ctx.Err() != nil {
 			return
 		}
-		if errors.Is(err, ErrNonRemoteManagedTunnelUnsupported) {
+		retry, cancelAll := connectionRetryDecision(err)
+		if cancelAll {
 			i.logger.Error("connection ", connIndex, " failed permanently: ", err)
 			i.cancel()
+			return
+		}
+		if !retry {
+			i.logger.Error("connection ", connIndex, " failed permanently: ", err)
 			return
 		}
 

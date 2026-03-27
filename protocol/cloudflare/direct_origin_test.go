@@ -184,3 +184,23 @@ func TestApplyConfigClearsDirectOriginTransportCache(t *testing.T) {
 		t.Fatal("expected ApplyConfig to clear direct-origin transport cache")
 	}
 }
+
+func TestNewDirectOriginTransportUsesCloudflaredDefaults(t *testing.T) {
+	inboundInstance := &Inbound{}
+	transport, cleanup, err := inboundInstance.newDirectOriginTransport(ResolvedService{
+		Kind:     ResolvedServiceUnix,
+		UnixPath: "/tmp/test.sock",
+		BaseURL:  &url.URL{Scheme: "http", Host: "localhost"},
+	}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+
+	if transport.ExpectContinueTimeout != time.Second {
+		t.Fatalf("expected ExpectContinueTimeout=1s, got %s", transport.ExpectContinueTimeout)
+	}
+	if transport.DisableCompression {
+		t.Fatal("expected compression to remain enabled by default")
+	}
+}

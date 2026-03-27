@@ -4,6 +4,7 @@ package cloudflare
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net"
 	"runtime"
@@ -41,6 +42,29 @@ type registrationRPCClient interface {
 	) (*RegistrationResult, error)
 	Unregister(ctx context.Context) error
 	Close() error
+}
+
+type permanentRegistrationError struct {
+	Err error
+}
+
+func (e *permanentRegistrationError) Error() string {
+	if e == nil || e.Err == nil {
+		return "permanent registration error"
+	}
+	return e.Err.Error()
+}
+
+func (e *permanentRegistrationError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
+func isPermanentRegistrationError(err error) bool {
+	var permanentErr *permanentRegistrationError
+	return errors.As(err, &permanentErr)
 }
 
 // NewRegistrationClient creates a Cap'n Proto RPC client over the given stream.
@@ -118,7 +142,7 @@ func (c *RegistrationClient) RegisterConnection(
 				Delay: time.Duration(resultError.RetryAfter()),
 			}
 		}
-		return nil, registrationError
+		return nil, &permanentRegistrationError{Err: registrationError}
 
 	case tunnelrpc.ConnectionResponse_result_Which_connectionDetails:
 		connDetails, err := result.ConnectionDetails()

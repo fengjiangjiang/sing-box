@@ -17,6 +17,10 @@ import (
 )
 
 func newRegisterUDPSessionCall(t *testing.T, traceContext string) (tunnelrpc.SessionManager_registerUdpSession, func() (tunnelrpc.RegisterUdpSessionResponse, error)) {
+	return newRegisterUDPSessionCallWithDstIP(t, []byte{127, 0, 0, 1}, traceContext)
+}
+
+func newRegisterUDPSessionCallWithDstIP(t *testing.T, dstIP []byte, traceContext string) (tunnelrpc.SessionManager_registerUdpSession, func() (tunnelrpc.RegisterUdpSessionResponse, error)) {
 	t.Helper()
 
 	_, paramsSeg, err := capnp.NewMessage(capnp.SingleSegment(nil))
@@ -31,7 +35,7 @@ func newRegisterUDPSessionCall(t *testing.T, traceContext string) (tunnelrpc.Ses
 	if err := params.SetSessionId(sessionID[:]); err != nil {
 		t.Fatal(err)
 	}
-	if err := params.SetDstIp([]byte{127, 0, 0, 1}); err != nil {
+	if err := params.SetDstIp(dstIP); err != nil {
 		t.Fatal(err)
 	}
 	params.SetDstPort(53)
@@ -195,5 +199,33 @@ func TestV2RPCUnregisterUDPSessionPropagatesMessage(t *testing.T) {
 	}
 	if reason := session.closeReason(); reason != "edge close" {
 		t.Fatalf("expected close reason propagated from edge, got %q", reason)
+	}
+}
+
+func TestV2RPCRegisterUDPSessionRejectsMissingDestinationIP(t *testing.T) {
+	inboundInstance := newLimitedInbound(t, 0)
+	inboundInstance.router = &packetDialingRouter{packetConn: newBlockingPacketConn()}
+	server := &cloudflaredServer{
+		inbound: inboundInstance,
+		muxer:   NewDatagramV2Muxer(inboundInstance, &captureDatagramSender{}, inboundInstance.logger),
+		ctx:     context.Background(),
+		logger:  inboundInstance.logger,
+	}
+	call, readResult := newRegisterUDPSessionCallWithDstIP(t, nil, "")
+
+	if err := server.RegisterUdpSession(call); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := readResult()
+	if err != nil {
+		t.Fatal(err)
+	}
+	resultErr, err := result.Err()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resultErr != "missing destination IP" {
+		t.Fatalf("unexpected result error %q", resultErr)
 	}
 }

@@ -232,3 +232,37 @@ func TestQUICGracefulShutdownWaitsForDrainWindow(t *testing.T) {
 		t.Fatal("expected graceful shutdown to finish")
 	}
 }
+
+func TestQUICGracefulShutdownStopsWaitingWhenServeContextEnds(t *testing.T) {
+	conn := newStubQUICConn()
+	registrationClient := newMockRegistrationClient()
+	serveCtx, cancelServe := context.WithCancel(context.Background())
+	connection := &QUICConnection{
+		conn:               conn,
+		gracePeriod:        time.Second,
+		registrationClient: registrationClient,
+		registrationResult: &RegistrationResult{},
+		serveCtx:           serveCtx,
+		serveCancel:        func() {},
+	}
+
+	done := make(chan struct{})
+	go func() {
+		connection.gracefulShutdown()
+		close(done)
+	}()
+
+	select {
+	case <-registrationClient.unregisterCalled:
+	case <-time.After(time.Second):
+		t.Fatal("expected unregister call")
+	}
+
+	cancelServe()
+
+	select {
+	case <-done:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("expected graceful shutdown to stop waiting once serve context ends")
+	}
+}

@@ -12,6 +12,7 @@ import (
 	"encoding/pem"
 	"io"
 	"math/big"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -20,7 +21,17 @@ import (
 	"time"
 
 	"github.com/sagernet/sing-box/adapter"
+	N "github.com/sagernet/sing/common/network"
 )
+
+type noopRouteConnectionRouter struct {
+	testRouter
+}
+
+func (r *noopRouteConnectionRouter) RouteConnectionEx(_ context.Context, conn net.Conn, _ adapter.InboundContext, onClose N.CloseHandlerFunc) {
+	_ = conn.Close()
+	onClose(nil)
+}
 
 func TestOriginTLSServerName(t *testing.T) {
 	t.Run("origin server name overrides host", func(t *testing.T) {
@@ -199,6 +210,24 @@ func TestNewRouterOriginTransportPropagatesTLSConfigError(t *testing.T) {
 	}, "")
 	if err == nil {
 		t.Fatal("expected transport build error")
+	}
+}
+
+func TestNewRouterOriginTransportUsesCloudflaredDefaults(t *testing.T) {
+	inbound := &Inbound{
+		router: &noopRouteConnectionRouter{},
+	}
+	transport, cleanup, err := inbound.newRouterOriginTransport(context.Background(), adapter.InboundContext{}, OriginRequestConfig{}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+
+	if transport.ExpectContinueTimeout != time.Second {
+		t.Fatalf("expected ExpectContinueTimeout=1s, got %s", transport.ExpectContinueTimeout)
+	}
+	if transport.DisableCompression {
+		t.Fatal("expected compression to remain enabled by default")
 	}
 }
 

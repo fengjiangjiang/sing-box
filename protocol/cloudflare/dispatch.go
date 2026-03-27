@@ -428,14 +428,14 @@ func (i *Inbound) newRouterOriginTransport(ctx context.Context, metadata adapter
 	input, cleanup, _ := i.dialRouterTCPWithMetadata(ctx, metadata, routedPipeTCPOptions{})
 
 	transport := &http.Transport{
-		DisableCompression:  true,
-		ForceAttemptHTTP2:   originRequest.HTTP2Origin,
-		TLSHandshakeTimeout: originRequest.TLSTimeout,
-		IdleConnTimeout:     originRequest.KeepAliveTimeout,
-		MaxIdleConns:        originRequest.KeepAliveConnections,
-		MaxIdleConnsPerHost: originRequest.KeepAliveConnections,
-		Proxy:               proxyFromEnvironment,
-		TLSClientConfig:     tlsConfig,
+		ExpectContinueTimeout: time.Second,
+		ForceAttemptHTTP2:     originRequest.HTTP2Origin,
+		TLSHandshakeTimeout:   originRequest.TLSTimeout,
+		IdleConnTimeout:       originRequest.KeepAliveTimeout,
+		MaxIdleConns:          originRequest.KeepAliveConnections,
+		MaxIdleConnsPerHost:   originRequest.KeepAliveConnections,
+		Proxy:                 proxyFromEnvironment,
+		TLSClientConfig:       tlsConfig,
 		DialContext: func(_ context.Context, _, _ string) (net.Conn, error) {
 			return input, nil
 		},
@@ -471,14 +471,14 @@ func (i *Inbound) newDirectOriginTransport(service ResolvedService, requestHost 
 		return nil, nil, err
 	}
 	transport := &http.Transport{
-		DisableCompression:  true,
-		ForceAttemptHTTP2:   service.OriginRequest.HTTP2Origin,
-		TLSHandshakeTimeout: service.OriginRequest.TLSTimeout,
-		IdleConnTimeout:     service.OriginRequest.KeepAliveTimeout,
-		MaxIdleConns:        service.OriginRequest.KeepAliveConnections,
-		MaxIdleConnsPerHost: service.OriginRequest.KeepAliveConnections,
-		Proxy:               proxyFromEnvironment,
-		TLSClientConfig:     tlsConfig,
+		ExpectContinueTimeout: time.Second,
+		ForceAttemptHTTP2:     service.OriginRequest.HTTP2Origin,
+		TLSHandshakeTimeout:   service.OriginRequest.TLSTimeout,
+		IdleConnTimeout:       service.OriginRequest.KeepAliveTimeout,
+		MaxIdleConns:          service.OriginRequest.KeepAliveConnections,
+		MaxIdleConnsPerHost:   service.OriginRequest.KeepAliveConnections,
+		Proxy:                 proxyFromEnvironment,
+		TLSClientConfig:       tlsConfig,
 	}
 	switch service.Kind {
 	case ResolvedServiceUnix, ResolvedServiceUnixTLS:

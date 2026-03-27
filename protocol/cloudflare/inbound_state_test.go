@@ -153,3 +153,76 @@ func TestSafeServeConnectionRecoversPanic(t *testing.T) {
 		t.Fatalf("expected recovered panic error, got %v", err)
 	}
 }
+
+func TestSuperviseConnectionStopsOnPermanentRegistrationError(t *testing.T) {
+	restoreConnectionHooks(t)
+
+	inboundInstance := newLimitedInbound(t, 0)
+	inboundInstance.protocol = "quic"
+	inboundInstance.initializeConnectionState(0)
+
+	permanentErr := &permanentRegistrationError{Err: errors.New("permanent register error")}
+	newQUICConnection = func(context.Context, *EdgeAddr, uint8, Credentials, uuid.UUID, string, []string, uint8, time.Duration, N.Dialer, func(), log.ContextLogger) (*QUICConnection, error) {
+		return &QUICConnection{}, nil
+	}
+	serveQUICConnection = func(*QUICConnection, context.Context, StreamHandler) error {
+		return permanentErr
+	}
+
+	inboundInstance.done.Add(1)
+	done := make(chan struct{})
+	go func() {
+		inboundInstance.superviseConnection(0, []*EdgeAddr{{}})
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("expected connection supervision to stop")
+	}
+
+	if retries := inboundInstance.connectionState(0).retries; retries != 0 {
+		t.Fatalf("expected no retries for permanent registration error, got %d", retries)
+	}
+
+	select {
+	case <-inboundInstance.ctx.Done():
+		t.Fatal("expected permanent registration error to stop only this connection")
+	default:
+	}
+}
+
+func TestSuperviseConnectionCancelsInboundOnNonRemoteManagedError(t *testing.T) {
+	restoreConnectionHooks(t)
+
+	inboundInstance := newLimitedInbound(t, 0)
+	inboundInstance.protocol = "quic"
+	inboundInstance.initializeConnectionState(0)
+
+	newQUICConnection = func(context.Context, *EdgeAddr, uint8, Credentials, uuid.UUID, string, []string, uint8, time.Duration, N.Dialer, func(), log.ContextLogger) (*QUICConnection, error) {
+		return &QUICConnection{}, nil
+	}
+	serveQUICConnection = func(*QUICConnection, context.Context, StreamHandler) error {
+		return ErrNonRemoteManagedTunnelUnsupported
+	}
+
+	inboundInstance.done.Add(1)
+	done := make(chan struct{})
+	go func() {
+		inboundInstance.superviseConnection(0, []*EdgeAddr{{}})
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("expected connection supervision to stop")
+	}
+
+	select {
+	case <-inboundInstance.ctx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("expected inbound cancellation on non-remote-managed tunnel error")
+	}
+}

@@ -164,11 +164,16 @@ func (m *DatagramV2Muxer) RegisterSession(
 	destinationPort uint16,
 	closeAfterIdle time.Duration,
 ) error {
+	if destinationIP == nil {
+		return E.New("missing destination IP")
+	}
 	var destinationAddr netip.Addr
 	if ip4 := destinationIP.To4(); ip4 != nil {
 		destinationAddr = netip.AddrFrom4([4]byte(ip4))
+	} else if ip16 := destinationIP.To16(); ip16 != nil {
+		destinationAddr = netip.AddrFrom16([16]byte(ip16))
 	} else {
-		destinationAddr = netip.AddrFrom16([16]byte(destinationIP.To16()))
+		return E.New("invalid destination IP")
 	}
 	destination := netip.AddrPortFrom(destinationAddr, destinationPort)
 
@@ -482,7 +487,11 @@ func (s *cloudflaredServer) RegisterUdpSession(call tunnelrpc.SessionManager_reg
 		return traceErr
 	}
 
-	err = s.muxer.RegisterSession(s.ctx, sessionID, net.IP(destinationIP), destinationPort, closeAfterIdle)
+	if len(destinationIP) == 0 {
+		err = E.New("missing destination IP")
+	} else {
+		err = s.muxer.RegisterSession(s.ctx, sessionID, net.IP(destinationIP), destinationPort, closeAfterIdle)
+	}
 
 	result, allocErr := call.Results.NewResult()
 	if allocErr != nil {
