@@ -63,7 +63,12 @@ func ServeV3RPCStream(ctx context.Context, stream io.ReadWriteCloser, inbound *I
 	client := tunnelrpc.CloudflaredServer_ServerToClient(srv)
 	transport := safeTransport(stream)
 	rpcConn := newRPCServerConn(transport, client.Client)
-	<-rpcConn.Done()
+	rpcCtx, cancel := context.WithTimeout(ctx, rpcTimeout)
+	defer cancel()
+	select {
+	case <-rpcConn.Done():
+	case <-rpcCtx.Done():
+	}
 	E.Errors(
 		rpcConn.Close(),
 		transport.Close(),

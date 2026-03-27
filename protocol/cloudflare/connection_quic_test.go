@@ -3,9 +3,14 @@
 package cloudflare
 
 import (
+	"context"
 	"io"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/sagernet/quic-go"
+	"github.com/sagernet/sing-box/log"
 )
 
 func TestQUICInitialPacketSize(t *testing.T) {
@@ -75,5 +80,50 @@ func TestNOPCloserReadWriterTracksEOF(t *testing.T) {
 	}
 	if _, err := wrapper.Read(make([]byte, 1)); err != io.EOF {
 		t.Fatalf("expected cached EOF, got %v", err)
+	}
+}
+
+type fakeQUICStream struct {
+	reader           strings.Reader
+	cancelWriteCount int
+}
+
+func (s *fakeQUICStream) Read(p []byte) (int, error)      { return s.reader.Read(p) }
+func (s *fakeQUICStream) Write(p []byte) (int, error)     { return len(p), nil }
+func (s *fakeQUICStream) Close() error                    { return nil }
+func (s *fakeQUICStream) CancelRead(quic.StreamErrorCode) {}
+func (s *fakeQUICStream) CancelWrite(quic.StreamErrorCode) {
+	s.cancelWriteCount++
+}
+func (s *fakeQUICStream) SetWriteDeadline(time.Time) error { return nil }
+
+func TestHandleStreamCancelsWriteOnSignatureError(t *testing.T) {
+	stream := &fakeQUICStream{reader: *strings.NewReader("broken")}
+	connection := &QUICConnection{logger: log.NewNOPFactory().NewLogger("test")}
+
+	connection.handleStream(context.Background(), stream, nil)
+	if stream.cancelWriteCount != 1 {
+		t.Fatalf("expected CancelWrite on signature error, got %d", stream.cancelWriteCount)
+	}
+}
+
+type nopStreamHandler struct{}
+
+func (nopStreamHandler) HandleDataStream(context.Context, io.ReadWriteCloser, *ConnectRequest, uint8) {
+}
+func (nopStreamHandler) HandleRPCStream(context.Context, io.ReadWriteCloser, uint8) {}
+func (nopStreamHandler) HandleRPCStreamWithSender(context.Context, io.ReadWriteCloser, uint8, DatagramSender) {
+}
+func (nopStreamHandler) HandleDatagram(context.Context, []byte, DatagramSender) {}
+
+func TestHandleStreamCancelsWriteOnConnectRequestError(t *testing.T) {
+	stream := &fakeQUICStream{
+		reader: *strings.NewReader(string(dataStreamSignature[:])),
+	}
+	connection := &QUICConnection{logger: log.NewNOPFactory().NewLogger("test")}
+
+	connection.handleStream(context.Background(), stream, nopStreamHandler{})
+	if stream.cancelWriteCount != 1 {
+		t.Fatalf("expected CancelWrite on connect request error, got %d", stream.cancelWriteCount)
 	}
 }

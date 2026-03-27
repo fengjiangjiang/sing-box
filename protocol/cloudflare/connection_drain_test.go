@@ -10,8 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/sagernet/quic-go"
+
+	"github.com/google/uuid"
 )
 
 type stubNetConn struct {
@@ -43,6 +44,7 @@ func (c *stubQUICConn) OpenStream() (*quic.Stream, error) { return nil, errors.N
 func (c *stubQUICConn) AcceptStream(context.Context) (*quic.Stream, error) {
 	return nil, errors.New("unused")
 }
+
 func (c *stubQUICConn) ReceiveDatagram(context.Context) ([]byte, error) {
 	return nil, errors.New("unused")
 }

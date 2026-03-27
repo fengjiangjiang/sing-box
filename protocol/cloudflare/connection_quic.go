@@ -60,6 +60,15 @@ type QUICConnection struct {
 	closeOnce         sync.Once
 }
 
+type quicStreamHandle interface {
+	io.Reader
+	io.Writer
+	io.Closer
+	CancelRead(code quic.StreamErrorCode)
+	CancelWrite(code quic.StreamErrorCode)
+	SetWriteDeadline(t time.Time) error
+}
+
 type quicConnection interface {
 	OpenStream() (*quic.Stream, error)
 	AcceptStream(ctx context.Context) (*quic.Stream, error)
@@ -79,7 +88,6 @@ func (c *closeableQUICConn) CloseWithError(code quic.ApplicationErrorCode, reaso
 	_ = c.udpConn.Close()
 	return err
 }
-
 
 // NewQUICConnection dials the edge and establishes a QUIC connection.
 func NewQUICConnection(
@@ -240,13 +248,14 @@ func (q *QUICConnection) acceptStreams(ctx context.Context, handler StreamHandle
 	}
 }
 
-func (q *QUICConnection) handleStream(ctx context.Context, stream *quic.Stream, handler StreamHandler) {
+func (q *QUICConnection) handleStream(ctx context.Context, stream quicStreamHandle, handler StreamHandler) {
 	rwc := newStreamReadWriteCloser(stream)
 	defer rwc.Close()
 
 	streamType, err := ReadStreamSignature(rwc)
 	if err != nil {
 		q.logger.Debug("failed to read stream signature: ", err)
+		stream.CancelWrite(0)
 		return
 	}
 
@@ -255,6 +264,7 @@ func (q *QUICConnection) handleStream(ctx context.Context, stream *quic.Stream, 
 		request, err := ReadConnectRequest(rwc)
 		if err != nil {
 			q.logger.Debug("failed to read connect request: ", err)
+			stream.CancelWrite(0)
 			return
 		}
 		handler.HandleDataStream(ctx, &nopCloserReadWriter{ReadWriteCloser: rwc}, request, q.connIndex)
@@ -365,11 +375,11 @@ type DatagramSender interface {
 // streamReadWriteCloser adapts a *quic.Stream to io.ReadWriteCloser
 // with mutex-protected writes and safe close semantics.
 type streamReadWriteCloser struct {
-	stream      *quic.Stream
+	stream      quicStreamHandle
 	writeAccess sync.Mutex
 }
 
-func newStreamReadWriteCloser(stream *quic.Stream) *streamReadWriteCloser {
+func newStreamReadWriteCloser(stream quicStreamHandle) *streamReadWriteCloser {
 	return &streamReadWriteCloser{stream: stream}
 }
 

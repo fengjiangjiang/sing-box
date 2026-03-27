@@ -20,8 +20,10 @@ import (
 const (
 	icmpFlowTimeout         = 30 * time.Second
 	icmpTraceIdentityLength = 16 + 8 + 1
-	defaultICMPPacketTTL    = 64
+	defaultICMPPacketTTL    = 255
 	icmpErrorHeaderLen      = 8
+	ipv4TTLExceededQuoteLen = 548
+	ipv6TTLExceededQuoteLen = 1232
 
 	icmpv4TypeEchoRequest  = 8
 	icmpv4TypeEchoReply    = 0
@@ -154,7 +156,13 @@ const (
 )
 
 type icmpFlowState struct {
-	writer *ICMPReplyWriter
+	writer     *ICMPReplyWriter
+	lastActive time.Time
+}
+
+type traceEntry struct {
+	context   ICMPTraceContext
+	createdAt time.Time
 }
 
 type ICMPReplyWriter struct {
@@ -162,14 +170,14 @@ type ICMPReplyWriter struct {
 	wireVersion icmpWireVersion
 
 	access sync.Mutex
-	traces map[ICMPRequestKey]ICMPTraceContext
+	traces map[ICMPRequestKey]traceEntry
 }
 
 func NewICMPReplyWriter(sender DatagramSender, wireVersion icmpWireVersion) *ICMPReplyWriter {
 	return &ICMPReplyWriter{
 		sender:      sender,
 		wireVersion: wireVersion,
-		traces:      make(map[ICMPRequestKey]ICMPTraceContext),
+		traces:      make(map[ICMPRequestKey]traceEntry),
 	}
 }
 
@@ -178,7 +186,10 @@ func (w *ICMPReplyWriter) RegisterRequestTrace(packetInfo ICMPPacketInfo, traceC
 		return
 	}
 	w.access.Lock()
-	w.traces[packetInfo.RequestKey()] = traceContext
+	w.traces[packetInfo.RequestKey()] = traceEntry{
+		context:   traceContext,
+		createdAt: time.Now(),
+	}
 	w.access.Unlock()
 }
 
@@ -193,17 +204,28 @@ func (w *ICMPReplyWriter) WritePacket(packet []byte) error {
 
 	requestKey := packetInfo.ReplyRequestKey()
 	w.access.Lock()
-	traceContext, loaded := w.traces[requestKey]
+	entry, loaded := w.traces[requestKey]
 	if loaded {
 		delete(w.traces, requestKey)
 	}
 	w.access.Unlock()
+	traceContext := entry.context
 
 	datagram, err := encodeICMPDatagram(packetInfo.RawPacket, w.wireVersion, traceContext)
 	if err != nil {
 		return err
 	}
 	return w.sender.SendDatagram(datagram)
+}
+
+func (w *ICMPReplyWriter) cleanupExpired(now time.Time) {
+	w.access.Lock()
+	defer w.access.Unlock()
+	for key, entry := range w.traces {
+		if now.After(entry.createdAt.Add(icmpFlowTimeout)) {
+			delete(w.traces, key)
+		}
+	}
 }
 
 type ICMPBridge struct {
@@ -217,13 +239,17 @@ type ICMPBridge struct {
 }
 
 func NewICMPBridge(inbound *Inbound, sender DatagramSender, wireVersion icmpWireVersion) *ICMPBridge {
-	return &ICMPBridge{
+	bridge := &ICMPBridge{
 		inbound:      inbound,
 		sender:       sender,
 		wireVersion:  wireVersion,
 		routeMapping: tun.NewDirectRouteMapping(icmpFlowTimeout),
 		flows:        make(map[ICMPFlowKey]*icmpFlowState),
 	}
+	if inbound != nil && inbound.ctx != nil {
+		go bridge.cleanupLoop(inbound.ctx)
+	}
+	return bridge
 }
 
 func (b *ICMPBridge) HandleV2(ctx context.Context, datagramType DatagramV2Type, payload []byte) error {
@@ -256,7 +282,7 @@ func (b *ICMPBridge) handlePacket(ctx context.Context, payload []byte, traceCont
 		return nil
 	}
 	if packetInfo.TTLExpired() {
-		ttlExceededPacket, err := buildICMPTTLExceededPacket(packetInfo, maxEncodedICMPPacketLen(b.wireVersion, traceContext))
+		ttlExceededPacket, err := buildICMPTTLExceededPacket(packetInfo)
 		if err != nil {
 			return err
 		}
@@ -272,6 +298,7 @@ func (b *ICMPBridge) handlePacket(ctx context.Context, payload []byte, traceCont
 	}
 
 	state := b.getFlowState(packetInfo.FlowKey())
+	state.lastActive = time.Now()
 	if traceContext.Traced {
 		state.writer.RegisterRequestTrace(packetInfo, traceContext)
 	}
@@ -309,6 +336,31 @@ func (b *ICMPBridge) getFlowState(key ICMPFlowKey) *icmpFlowState {
 	}
 	b.flows[key] = state
 	return state
+}
+
+func (b *ICMPBridge) cleanupLoop(ctx context.Context) {
+	ticker := time.NewTicker(icmpFlowTimeout)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-ticker.C:
+			b.cleanupExpired(now)
+		}
+	}
+}
+
+func (b *ICMPBridge) cleanupExpired(now time.Time) {
+	b.flowAccess.Lock()
+	defer b.flowAccess.Unlock()
+	for key, state := range b.flows {
+		state.writer.cleanupExpired(now)
+		if now.After(state.lastActive.Add(icmpFlowTimeout)) {
+			delete(b.flows, key)
+		}
+	}
 }
 
 func ParseICMPPacket(packet []byte) (ICMPPacketInfo, error) {
@@ -408,27 +460,24 @@ func maxEncodedICMPPacketLen(wireVersion icmpWireVersion, traceContext ICMPTrace
 	return limit
 }
 
-func buildICMPTTLExceededPacket(packetInfo ICMPPacketInfo, maxPacketLen int) ([]byte, error) {
+func buildICMPTTLExceededPacket(packetInfo ICMPPacketInfo) ([]byte, error) {
 	switch packetInfo.IPVersion {
 	case 4:
-		return buildIPv4ICMPTTLExceededPacket(packetInfo, maxPacketLen)
+		return buildIPv4ICMPTTLExceededPacket(packetInfo)
 	case 6:
-		return buildIPv6ICMPTTLExceededPacket(packetInfo, maxPacketLen)
+		return buildIPv6ICMPTTLExceededPacket(packetInfo)
 	default:
 		return nil, E.New("unsupported IP version: ", packetInfo.IPVersion)
 	}
 }
 
-func buildIPv4ICMPTTLExceededPacket(packetInfo ICMPPacketInfo, maxPacketLen int) ([]byte, error) {
+func buildIPv4ICMPTTLExceededPacket(packetInfo ICMPPacketInfo) ([]byte, error) {
 	const headerLen = 20
 	if !packetInfo.SourceIP.Is4() || !packetInfo.Destination.Is4() {
 		return nil, E.New("TTL exceeded packet requires IPv4 addresses")
 	}
-	if maxPacketLen <= headerLen+icmpErrorHeaderLen {
-		return nil, E.New("TTL exceeded packet size limit is too small")
-	}
 
-	quotedLength := min(len(packetInfo.RawPacket), maxPacketLen-headerLen-icmpErrorHeaderLen)
+	quotedLength := min(len(packetInfo.RawPacket), ipv4TTLExceededQuoteLen)
 	packet := make([]byte, headerLen+icmpErrorHeaderLen+quotedLength)
 	packet[0] = 0x45
 	binary.BigEndian.PutUint16(packet[2:4], uint16(len(packet)))
@@ -444,16 +493,13 @@ func buildIPv4ICMPTTLExceededPacket(packetInfo ICMPPacketInfo, maxPacketLen int)
 	return packet, nil
 }
 
-func buildIPv6ICMPTTLExceededPacket(packetInfo ICMPPacketInfo, maxPacketLen int) ([]byte, error) {
+func buildIPv6ICMPTTLExceededPacket(packetInfo ICMPPacketInfo) ([]byte, error) {
 	const headerLen = 40
 	if !packetInfo.SourceIP.Is6() || !packetInfo.Destination.Is6() {
 		return nil, E.New("TTL exceeded packet requires IPv6 addresses")
 	}
-	if maxPacketLen <= headerLen+icmpErrorHeaderLen {
-		return nil, E.New("TTL exceeded packet size limit is too small")
-	}
 
-	quotedLength := min(len(packetInfo.RawPacket), maxPacketLen-headerLen-icmpErrorHeaderLen)
+	quotedLength := min(len(packetInfo.RawPacket), ipv6TTLExceededQuoteLen)
 	packet := make([]byte, headerLen+icmpErrorHeaderLen+quotedLength)
 	packet[0] = 0x60
 	binary.BigEndian.PutUint16(packet[4:6], uint16(icmpErrorHeaderLen+quotedLength))
@@ -509,14 +555,7 @@ func checksum(data []byte, initial uint32) uint16 {
 	return ^uint16(sum)
 }
 
-func encodeV2ICMPDatagram(packet []byte, traceContext ICMPTraceContext) ([]byte, error) {
-	if traceContext.Traced {
-		data := make([]byte, 0, len(packet)+len(traceContext.Identity)+1)
-		data = append(data, packet...)
-		data = append(data, traceContext.Identity...)
-		data = append(data, byte(DatagramV2TypeIPWithTrace))
-		return data, nil
-	}
+func encodeV2ICMPDatagram(packet []byte, _ ICMPTraceContext) ([]byte, error) {
 	data := make([]byte, 0, len(packet)+1)
 	data = append(data, packet...)
 	data = append(data, byte(DatagramV2TypeIP))

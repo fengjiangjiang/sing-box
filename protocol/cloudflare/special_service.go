@@ -28,7 +28,9 @@ var wsAcceptGUID = []byte("258EAFA5-E914-47DA-95CA-C5AB0DC85B11")
 const (
 	socksReplySuccess             = 0
 	socksReplyRuleFailure         = 2
+	socksReplyNetworkUnreachable  = 3
 	socksReplyHostUnreachable     = 4
+	socksReplyConnectionRefused   = 5
 	socksReplyCommandNotSupported = 7
 )
 
@@ -223,6 +225,19 @@ func (i *Inbound) serveSocksProxy(ctx context.Context, conn net.Conn, policy *ip
 	if _, err := io.ReadFull(conn, methods); err != nil {
 		return err
 	}
+	var supportsNoAuth bool
+	for _, method := range methods {
+		if method == 0 {
+			supportsNoAuth = true
+			break
+		}
+	}
+	if !supportsNoAuth {
+		if _, err := conn.Write([]byte{5, 255}); err != nil {
+			return err
+		}
+		return E.New("unknown authentication type")
+	}
 	if _, err := conn.Write([]byte{5, 0}); err != nil {
 		return err
 	}
@@ -254,7 +269,7 @@ func (i *Inbound) serveSocksProxy(ctx context.Context, conn net.Conn, policy *ip
 	}
 	targetConn, cleanup, err := i.dialRouterTCP(ctx, destination)
 	if err != nil {
-		_ = writeSocksReply(conn, socksReplyHostUnreachable)
+		_ = writeSocksReply(conn, socksReplyForDialError(err))
 		return err
 	}
 	defer cleanup()
@@ -268,6 +283,18 @@ func (i *Inbound) serveSocksProxy(ctx context.Context, conn net.Conn, policy *ip
 func writeSocksReply(conn net.Conn, reply byte) error {
 	_, err := conn.Write([]byte{5, reply, 0, 1, 0, 0, 0, 0, 0, 0})
 	return err
+}
+
+func socksReplyForDialError(err error) byte {
+	lower := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(lower, "refused"):
+		return socksReplyConnectionRefused
+	case strings.Contains(lower, "network is unreachable"):
+		return socksReplyNetworkUnreachable
+	default:
+		return socksReplyHostUnreachable
+	}
 }
 
 func readSocksDestination(conn net.Conn, addressType byte) (M.Socksaddr, error) {

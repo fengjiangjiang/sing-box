@@ -14,6 +14,7 @@ import (
 	"time"
 
 	boxTLS "github.com/sagernet/sing-box/common/tls"
+	"github.com/sagernet/sing-box/log"
 )
 
 func TestNewDirectOriginTransportUnix(t *testing.T) {
@@ -117,4 +118,69 @@ func TestNewDirectOriginTransportUnixTLS(t *testing.T) {
 func serveTestHTTPOverListener(listener net.Listener, handler func(http.ResponseWriter, *http.Request)) {
 	server := &http.Server{Handler: http.HandlerFunc(handler)}
 	_ = server.Serve(listener)
+}
+
+func TestDirectOriginTransportCacheReusesMatchingTransports(t *testing.T) {
+	inboundInstance := &Inbound{
+		directTransports: make(map[string]*http.Transport),
+	}
+	service := ResolvedService{
+		Kind:     ResolvedServiceUnix,
+		UnixPath: "/tmp/test.sock",
+		BaseURL:  &url.URL{Scheme: "http", Host: "localhost"},
+	}
+
+	transport1, _, err := inboundInstance.newDirectOriginTransport(service, "example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport2, _, err := inboundInstance.newDirectOriginTransport(service, "example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if transport1 != transport2 {
+		t.Fatal("expected matching direct-origin transports to be reused")
+	}
+
+	transport3, _, err := inboundInstance.newDirectOriginTransport(service, "other.example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if transport3 == transport1 {
+		t.Fatal("expected different cache keys to produce different transports")
+	}
+}
+
+func TestApplyConfigClearsDirectOriginTransportCache(t *testing.T) {
+	configManager, err := NewConfigManager()
+	if err != nil {
+		t.Fatal(err)
+	}
+	inboundInstance := &Inbound{
+		logger:           log.NewNOPFactory().NewLogger("test"),
+		configManager:    configManager,
+		directTransports: make(map[string]*http.Transport),
+	}
+	service := ResolvedService{
+		Kind:     ResolvedServiceUnix,
+		UnixPath: "/tmp/test.sock",
+		BaseURL:  &url.URL{Scheme: "http", Host: "localhost"},
+	}
+
+	transport1, _, err := inboundInstance.newDirectOriginTransport(service, "example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := inboundInstance.ApplyConfig(1, []byte(`{"ingress":[{"service":"http_status:503"}]}`))
+	if result.Err != nil {
+		t.Fatal(result.Err)
+	}
+
+	transport2, _, err := inboundInstance.newDirectOriginTransport(service, "example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if transport1 == transport2 {
+		t.Fatal("expected ApplyConfig to clear direct-origin transport cache")
+	}
 }

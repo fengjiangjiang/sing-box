@@ -4,13 +4,15 @@ package cloudflare
 
 import (
 	"context"
+	"net"
 	"testing"
+	"time"
 
-	"github.com/google/uuid"
 	"github.com/sagernet/sing-box/adapter/inbound"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/protocol/cloudflare/tunnelrpc"
 
+	"github.com/google/uuid"
 	capnp "zombiezen.com/go/capnproto2"
 )
 
@@ -90,6 +92,40 @@ func newUnregisterUDPSessionCall(t *testing.T) tunnelrpc.SessionManager_unregist
 	}
 }
 
+func newUnregisterUDPSessionCallForSession(t *testing.T, sessionID uuid.UUID, message string) tunnelrpc.SessionManager_unregisterUdpSession {
+	t.Helper()
+
+	_, paramsSeg, err := capnp.NewMessage(capnp.SingleSegment(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	params, err := tunnelrpc.NewSessionManager_unregisterUdpSession_Params(paramsSeg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := params.SetSessionId(sessionID[:]); err != nil {
+		t.Fatal(err)
+	}
+	if err := params.SetMessage(message); err != nil {
+		t.Fatal(err)
+	}
+
+	_, resultsSeg, err := capnp.NewMessage(capnp.SingleSegment(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	results, err := tunnelrpc.NewSessionManager_unregisterUdpSession_Results(resultsSeg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return tunnelrpc.SessionManager_unregisterUdpSession{
+		Ctx:     context.Background(),
+		Params:  params,
+		Results: results,
+	}
+}
+
 func TestV3RPCRegisterUDPSessionReturnsUnsupportedResult(t *testing.T) {
 	server := &cloudflaredV3Server{
 		inbound: &Inbound{Adapter: inbound.NewAdapter(C.TypeCloudflared, "test")},
@@ -129,5 +165,35 @@ func TestV3RPCUnregisterUDPSessionReturnsUnsupportedError(t *testing.T) {
 	}
 	if err.Error() != errUnsupportedDatagramV3UDPUnregistration.Error() {
 		t.Fatalf("unexpected unregister error %v", err)
+	}
+}
+
+func TestV2RPCUnregisterUDPSessionPropagatesMessage(t *testing.T) {
+	inboundInstance := newLimitedInbound(t, 0)
+	inboundInstance.router = &packetDialingRouter{packetConn: newBlockingPacketConn()}
+	muxer := NewDatagramV2Muxer(inboundInstance, &captureDatagramSender{}, inboundInstance.logger)
+
+	sessionID := uuid.New()
+	if err := muxer.RegisterSession(context.Background(), sessionID, net.IPv4(127, 0, 0, 1), 53, time.Second); err != nil {
+		t.Fatal(err)
+	}
+	muxer.sessionAccess.RLock()
+	session := muxer.sessions[sessionID]
+	muxer.sessionAccess.RUnlock()
+	if session == nil {
+		t.Fatal("expected registered session")
+	}
+
+	server := &cloudflaredServer{
+		inbound: inboundInstance,
+		muxer:   muxer,
+		ctx:     context.Background(),
+		logger:  inboundInstance.logger,
+	}
+	if err := server.UnregisterUdpSession(newUnregisterUDPSessionCallForSession(t, sessionID, "edge close")); err != nil {
+		t.Fatal(err)
+	}
+	if reason := session.closeReason(); reason != "edge close" {
+		t.Fatalf("expected close reason propagated from edge, got %q", reason)
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -27,7 +28,16 @@ const (
 	h2EdgeSNI                        = "h2.cftunnel.com"
 	h2ResponseMetaCloudflared        = `{"src":"cloudflared"}`
 	h2ResponseMetaCloudflaredLimited = `{"src":"cloudflared","flow_rate_limited":true}`
+	contentTypeHeader                = "content-type"
+	contentLengthHeader              = "content-length"
+	transferEncodingHeader           = "transfer-encoding"
+	chunkTransferEncoding            = "chunked"
+	sseContentType                   = "text/event-stream"
+	grpcContentType                  = "application/grpc"
+	ndjsonContentType                = "application/x-ndjson"
 )
+
+var flushableContentTypes = []string{sseContentType, grpcContentType, ndjsonContentType}
 
 // HTTP2Connection manages a single HTTP/2 connection to the Cloudflare edge.
 // Uses role reversal: we dial the edge as a TLS client but serve HTTP/2 as server.
@@ -191,7 +201,7 @@ func (c *HTTP2Connection) handleControlStream(ctx context.Context, r *http.Reque
 		return
 	}
 	c.registrationResult = result
-	c.inbound.notifyConnected(c.connIndex)
+	c.inbound.notifyConnected(c.connIndex, "http2")
 
 	c.logger.Info("connected to ", result.Location,
 		" (connection ", result.ConnectionID, ")")
@@ -246,14 +256,18 @@ func (c *HTTP2Connection) handleH2DataStream(ctx context.Context, r *http.Reques
 		}
 	}
 
+	flushState := &http2FlushState{shouldFlush: connectionType != ConnectionTypeHTTP}
 	stream := &http2DataStream{
 		reader:  r.Body,
 		writer:  w,
 		flusher: flusher,
+		state:   flushState,
+		logger:  c.logger,
 	}
 	respWriter := &http2ResponseWriter{
-		writer:  w,
-		flusher: flusher,
+		writer:     w,
+		flusher:    flusher,
+		flushState: flushState,
 	}
 
 	c.inbound.dispatchRequest(ctx, stream, respWriter, request)
@@ -386,15 +400,26 @@ type http2DataStream struct {
 	reader  io.ReadCloser
 	writer  http.ResponseWriter
 	flusher http.Flusher
+	state   *http2FlushState
+	logger  log.ContextLogger
 }
 
 func (s *http2DataStream) Read(p []byte) (int, error) {
 	return s.reader.Read(p)
 }
 
-func (s *http2DataStream) Write(p []byte) (int, error) {
-	n, err := s.writer.Write(p)
-	if err == nil {
+func (s *http2DataStream) Write(p []byte) (n int, err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			if s.logger != nil {
+				s.logger.Debug("recovered from HTTP/2 data stream panic: ", recovered, "\n", string(debug.Stack()))
+			}
+			n = 0
+			err = io.ErrClosedPipe
+		}
+	}()
+	n, err = s.writer.Write(p)
+	if err == nil && s.state != nil && s.state.shouldFlush {
 		s.flusher.Flush()
 	}
 	return n, err
@@ -409,6 +434,7 @@ type http2ResponseWriter struct {
 	writer      http.ResponseWriter
 	flusher     http.Flusher
 	headersSent bool
+	flushState  *http2FlushState
 }
 
 func (w *http2ResponseWriter) AddTrailer(name, value string) {
@@ -462,12 +488,37 @@ func (w *http2ResponseWriter) WriteResponse(responseError error, metadata []Meta
 
 	w.writer.Header().Set(h2HeaderResponseUser, SerializeHeaders(userHeaders))
 	w.writer.Header().Set(h2HeaderResponseMeta, h2ResponseMetaOrigin)
+	if w.flushState != nil && shouldFlushHTTPHeaders(userHeaders) {
+		w.flushState.shouldFlush = true
+	}
 
 	if statusCode == http.StatusSwitchingProtocols {
 		statusCode = http.StatusOK
 	}
 
 	w.writer.WriteHeader(statusCode)
-	w.flusher.Flush()
+	if w.flushState != nil && w.flushState.shouldFlush {
+		w.flusher.Flush()
+	}
 	return nil
+}
+
+type http2FlushState struct {
+	shouldFlush bool
+}
+
+func shouldFlushHTTPHeaders(headers http.Header) bool {
+	if headers.Get(contentLengthHeader) == "" {
+		return true
+	}
+	if transferEncoding := strings.ToLower(headers.Get(transferEncodingHeader)); transferEncoding != "" && strings.Contains(transferEncoding, chunkTransferEncoding) {
+		return true
+	}
+	contentType := strings.ToLower(headers.Get(contentTypeHeader))
+	for _, flushable := range flushableContentTypes {
+		if strings.HasPrefix(contentType, flushable) {
+			return true
+		}
+	}
+	return false
 }

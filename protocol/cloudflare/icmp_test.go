@@ -131,12 +131,11 @@ func TestICMPBridgeHandleV2TracedReply(t *testing.T) {
 		t.Fatalf("expected one reply datagram, got %d", len(sender.sent))
 	}
 	reply := sender.sent[0]
-	if reply[len(reply)-1] != byte(DatagramV2TypeIPWithTrace) {
-		t.Fatalf("expected traced v2 reply, got type %d", reply[len(reply)-1])
+	if reply[len(reply)-1] != byte(DatagramV2TypeIP) {
+		t.Fatalf("expected plain v2 IP reply, got type %d", reply[len(reply)-1])
 	}
-	gotIdentity := reply[len(reply)-1-icmpTraceIdentityLength : len(reply)-1]
-	if !bytes.Equal(gotIdentity, traceIdentity) {
-		t.Fatalf("unexpected trace identity: %x", gotIdentity)
+	if len(reply) != len(buildEchoReply(buildIPv4ICMPPacket(netip.MustParseAddr("198.18.0.2"), netip.MustParseAddr("1.1.1.1"), 8, 0, 9, 7)))+1 {
+		t.Fatalf("unexpected traced reply size: %d", len(reply))
 	}
 }
 
@@ -257,14 +256,10 @@ func TestICMPBridgeHandleV2TTLExceededTracedReply(t *testing.T) {
 		t.Fatalf("expected one TTL exceeded reply, got %d", len(sender.sent))
 	}
 	reply := sender.sent[0]
-	if reply[len(reply)-1] != byte(DatagramV2TypeIPWithTrace) {
-		t.Fatalf("expected traced v2 reply, got type %d", reply[len(reply)-1])
+	if reply[len(reply)-1] != byte(DatagramV2TypeIP) {
+		t.Fatalf("expected plain v2 reply, got type %d", reply[len(reply)-1])
 	}
-	gotIdentity := reply[len(reply)-1-icmpTraceIdentityLength : len(reply)-1]
-	if !bytes.Equal(gotIdentity, traceIdentity) {
-		t.Fatalf("unexpected trace identity: %x", gotIdentity)
-	}
-	rawReply := reply[:len(reply)-1-icmpTraceIdentityLength]
+	rawReply := reply[:len(reply)-1]
 	packetInfo, err := ParseICMPPacket(rawReply)
 	if err != nil {
 		t.Fatal(err)
@@ -274,6 +269,9 @@ func TestICMPBridgeHandleV2TTLExceededTracedReply(t *testing.T) {
 	}
 	if packetInfo.SourceIP != target || packetInfo.Destination != source {
 		t.Fatalf("unexpected TTL exceeded routing: src=%s dst=%s", packetInfo.SourceIP, packetInfo.Destination)
+	}
+	if packetInfo.TTL() != 255 {
+		t.Fatalf("expected TTL exceeded packet TTL 255, got %d", packetInfo.TTL())
 	}
 }
 
@@ -319,6 +317,9 @@ func TestICMPBridgeHandleV3TTLExceededReply(t *testing.T) {
 	if packetInfo.SourceIP != target || packetInfo.Destination != source {
 		t.Fatalf("unexpected TTL exceeded routing: src=%s dst=%s", packetInfo.SourceIP, packetInfo.Destination)
 	}
+	if packetInfo.TTL() != 255 {
+		t.Fatalf("expected TTL exceeded packet TTL 255, got %d", packetInfo.TTL())
+	}
 }
 
 func TestICMPBridgeDropsNonEcho(t *testing.T) {
@@ -345,6 +346,77 @@ func TestICMPBridgeDropsNonEcho(t *testing.T) {
 	}
 	if len(sender.sent) != 0 {
 		t.Fatalf("expected no sender datagrams, got %d", len(sender.sent))
+	}
+}
+
+func TestBuildICMPTTLExceededPacketUsesRFCQuoteLengths(t *testing.T) {
+	ipv4Packet := buildIPv4ICMPPacket(netip.MustParseAddr("198.18.0.2"), netip.MustParseAddr("1.1.1.1"), icmpv4TypeEchoRequest, 0, 1, 1)
+	ipv4Packet = append(ipv4Packet, bytes.Repeat([]byte{0xaa}, 4096)...)
+	ipv4Info, err := ParseICMPPacket(ipv4Packet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ipv4Reply, err := buildICMPTTLExceededPacket(ipv4Info)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ipv4Reply) != 20+icmpErrorHeaderLen+ipv4TTLExceededQuoteLen {
+		t.Fatalf("unexpected IPv4 TTL exceeded size: %d", len(ipv4Reply))
+	}
+
+	ipv6Packet := buildIPv6ICMPPacket(netip.MustParseAddr("2001:db8::2"), netip.MustParseAddr("2606:4700:4700::1111"), icmpv6TypeEchoRequest, 0, 1, 1)
+	ipv6Packet = append(ipv6Packet, bytes.Repeat([]byte{0xbb}, 4096)...)
+	ipv6Info, err := ParseICMPPacket(ipv6Packet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ipv6Reply, err := buildICMPTTLExceededPacket(ipv6Info)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ipv6Reply) != 40+icmpErrorHeaderLen+ipv6TTLExceededQuoteLen {
+		t.Fatalf("unexpected IPv6 TTL exceeded size: %d", len(ipv6Reply))
+	}
+}
+
+func TestICMPBridgeCleanupExpired(t *testing.T) {
+	bridge := NewICMPBridge(&Inbound{}, &captureDatagramSender{}, icmpWireV2)
+	now := time.Now()
+
+	expiredKey := ICMPFlowKey{
+		IPVersion:   4,
+		SourceIP:    netip.MustParseAddr("198.18.0.2"),
+		Destination: netip.MustParseAddr("1.1.1.1"),
+	}
+	expiredState := bridge.getFlowState(expiredKey)
+	expiredState.lastActive = now.Add(-icmpFlowTimeout - time.Second)
+	expiredState.writer.traces[ICMPRequestKey{Flow: expiredKey, Identifier: 1, Sequence: 1}] = traceEntry{
+		context:   ICMPTraceContext{Traced: true, Identity: []byte{1}},
+		createdAt: now.Add(-icmpFlowTimeout - time.Second),
+	}
+
+	activeKey := ICMPFlowKey{
+		IPVersion:   6,
+		SourceIP:    netip.MustParseAddr("2001:db8::2"),
+		Destination: netip.MustParseAddr("2606:4700:4700::1111"),
+	}
+	activeState := bridge.getFlowState(activeKey)
+	activeState.lastActive = now
+	activeState.writer.traces[ICMPRequestKey{Flow: activeKey, Identifier: 2, Sequence: 2}] = traceEntry{
+		context:   ICMPTraceContext{Traced: true, Identity: []byte{2}},
+		createdAt: now,
+	}
+
+	bridge.cleanupExpired(now)
+
+	if _, exists := bridge.flows[expiredKey]; exists {
+		t.Fatal("expected expired flow to be removed")
+	}
+	if _, exists := bridge.flows[activeKey]; !exists {
+		t.Fatal("expected active flow to remain")
+	}
+	if len(activeState.writer.traces) != 1 {
+		t.Fatalf("expected active trace to remain, got %d", len(activeState.writer.traces))
 	}
 }
 

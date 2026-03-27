@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"os"
 	"testing"
 	"time"
 
@@ -147,5 +148,85 @@ func TestDatagramV3ReadLoopDropsOversizedOriginPackets(t *testing.T) {
 	}
 	if len(sender.sent[0]) != v3PayloadHeaderLen+2 {
 		t.Fatalf("unexpected forwarded datagram length: %d", len(sender.sent[0]))
+	}
+}
+
+func TestDatagramV3HandlePayloadDropsOversizedPayload(t *testing.T) {
+	requestID := RequestID{}
+	requestID[15] = 9
+	session := &v3Session{
+		id:        requestID,
+		writeChan: make(chan []byte, 1),
+	}
+	manager := NewDatagramV3SessionManager()
+	manager.sessions[requestID] = session
+	muxer := &DatagramV3Muxer{
+		inbound: &Inbound{
+			datagramV3Manager: manager,
+		},
+	}
+
+	payload := make([]byte, v3RequestIDLength+maxV3UDPPayloadLen+1)
+	copy(payload[:v3RequestIDLength], requestID[:])
+	muxer.handlePayload(payload)
+
+	select {
+	case <-session.writeChan:
+		t.Fatal("expected oversized payload to be dropped")
+	default:
+	}
+}
+
+type deadlinePacketConn struct {
+	err error
+}
+
+func (c *deadlinePacketConn) ReadPacket(buffer *buf.Buffer) (M.Socksaddr, error) {
+	buffer.Release()
+	return M.Socksaddr{}, io.EOF
+}
+
+func (c *deadlinePacketConn) WritePacket(buffer *buf.Buffer, _ M.Socksaddr) error {
+	buffer.Release()
+	return c.err
+}
+
+func (c *deadlinePacketConn) Close() error                     { return nil }
+func (c *deadlinePacketConn) LocalAddr() net.Addr              { return &net.UDPAddr{} }
+func (c *deadlinePacketConn) SetDeadline(time.Time) error      { return nil }
+func (c *deadlinePacketConn) SetReadDeadline(time.Time) error  { return nil }
+func (c *deadlinePacketConn) SetWriteDeadline(time.Time) error { return nil }
+
+func TestDatagramV3WriteLoopDropsDeadlineExceeded(t *testing.T) {
+	session := &v3Session{
+		destination: netip.MustParseAddrPort("127.0.0.1:53"),
+		origin:      &deadlinePacketConn{err: os.ErrDeadlineExceeded},
+		inbound: &Inbound{
+			logger: log.NewNOPFactory().NewLogger("test"),
+		},
+		writeChan: make(chan []byte, 1),
+		closeChan: make(chan struct{}),
+	}
+
+	done := make(chan struct{})
+	go func() {
+		session.writeLoop()
+		close(done)
+	}()
+
+	session.writeToOrigin([]byte("payload"))
+	time.Sleep(50 * time.Millisecond)
+
+	select {
+	case <-session.closeChan:
+		t.Fatal("expected session to remain open after deadline exceeded")
+	default:
+	}
+
+	session.close()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("expected write loop to exit after manual close")
 	}
 }

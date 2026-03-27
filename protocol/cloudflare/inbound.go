@@ -8,6 +8,8 @@ import (
 	"errors"
 	"io"
 	"math/rand"
+	"net/http"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -29,6 +31,17 @@ func RegisterInbound(registry *inbound.Registry) {
 }
 
 var ErrNonRemoteManagedTunnelUnsupported = errors.New("cloudflared only supports remote-managed tunnels")
+
+var (
+	newQUICConnection   = NewQUICConnection
+	newHTTP2Connection  = NewHTTP2Connection
+	serveQUICConnection = func(connection *QUICConnection, ctx context.Context, handler StreamHandler) error {
+		return connection.Serve(ctx, handler)
+	}
+	serveHTTP2Connection = func(connection *HTTP2Connection, ctx context.Context) error {
+		return connection.Serve(ctx)
+	}
+)
 
 type Inbound struct {
 	inbound.Adapter
@@ -63,6 +76,19 @@ type Inbound struct {
 	connectedAccess  sync.Mutex
 	connectedIndices map[uint8]struct{}
 	connectedNotify  chan uint8
+
+	stateAccess             sync.Mutex
+	connectionStates        []connectionState
+	successfulProtocols     map[string]struct{}
+	firstSuccessfulProtocol string
+
+	directTransportAccess sync.Mutex
+	directTransports      map[string]*http.Transport
+}
+
+type connectionState struct {
+	protocol string
+	retries  uint8
 }
 
 func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.CloudflaredInboundOptions) (adapter.Inbound, error) {
@@ -130,30 +156,33 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 	inboundCtx, cancel := context.WithCancel(ctx)
 
 	return &Inbound{
-		Adapter:           inbound.NewAdapter(C.TypeCloudflared, tag),
-		ctx:               inboundCtx,
-		cancel:            cancel,
-		router:            router,
-		logger:            logger,
-		credentials:       credentials,
-		connectorID:       uuid.New(),
-		haConnections:     haConnections,
-		protocol:          protocol,
-		region:            region,
-		edgeIPVersion:     edgeIPVersion,
-		datagramVersion:   datagramVersion,
-		featureSelector:   newFeatureSelector(inboundCtx, credentials.AccountTag, datagramVersion),
-		gracePeriod:       gracePeriod,
-		configManager:     configManager,
-		flowLimiter:       &FlowLimiter{},
-		accessCache:       &accessValidatorCache{values: make(map[string]accessValidator), dialer: controlDialer},
-		controlDialer:     controlDialer,
-		tunnelDialer:      tunnelDialer,
-		datagramV2Muxers:  make(map[DatagramSender]*DatagramV2Muxer),
-		datagramV3Muxers:  make(map[DatagramSender]*DatagramV3Muxer),
-		datagramV3Manager: NewDatagramV3SessionManager(),
-		connectedIndices:  make(map[uint8]struct{}),
-		connectedNotify:   make(chan uint8, haConnections),
+		Adapter:             inbound.NewAdapter(C.TypeCloudflared, tag),
+		ctx:                 inboundCtx,
+		cancel:              cancel,
+		router:              router,
+		logger:              logger,
+		credentials:         credentials,
+		connectorID:         uuid.New(),
+		haConnections:       haConnections,
+		protocol:            protocol,
+		region:              region,
+		edgeIPVersion:       edgeIPVersion,
+		datagramVersion:     datagramVersion,
+		featureSelector:     newFeatureSelector(inboundCtx, credentials.AccountTag, datagramVersion),
+		gracePeriod:         gracePeriod,
+		configManager:       configManager,
+		flowLimiter:         &FlowLimiter{},
+		accessCache:         &accessValidatorCache{values: make(map[string]accessValidator), dialer: controlDialer},
+		controlDialer:       controlDialer,
+		tunnelDialer:        tunnelDialer,
+		datagramV2Muxers:    make(map[DatagramSender]*DatagramV2Muxer),
+		datagramV3Muxers:    make(map[DatagramSender]*DatagramV3Muxer),
+		datagramV3Manager:   NewDatagramV3SessionManager(),
+		connectedIndices:    make(map[uint8]struct{}),
+		connectedNotify:     make(chan uint8, haConnections),
+		connectionStates:    make([]connectionState, haConnections),
+		successfulProtocols: make(map[string]struct{}),
+		directTransports:    make(map[string]*http.Transport),
 	}, nil
 }
 
@@ -179,6 +208,7 @@ func (i *Inbound) Start(stage adapter.StartStage) error {
 	}
 
 	for connIndex := 0; connIndex < i.haConnections; connIndex++ {
+		i.initializeConnectionState(uint8(connIndex))
 		i.done.Add(1)
 		go i.superviseConnection(uint8(connIndex), edgeAddrs)
 		select {
@@ -197,7 +227,24 @@ func (i *Inbound) Start(stage adapter.StartStage) error {
 	return nil
 }
 
-func (i *Inbound) notifyConnected(connIndex uint8) {
+func (i *Inbound) notifyConnected(connIndex uint8, protocol string) {
+	i.stateAccess.Lock()
+	if i.successfulProtocols == nil {
+		i.successfulProtocols = make(map[string]struct{})
+	}
+	i.ensureConnectionStateLocked(connIndex)
+	state := i.connectionStates[connIndex]
+	state.retries = 0
+	state.protocol = protocol
+	i.connectionStates[connIndex] = state
+	if protocol != "" {
+		i.successfulProtocols[protocol] = struct{}{}
+		if i.firstSuccessfulProtocol == "" {
+			i.firstSuccessfulProtocol = protocol
+		}
+	}
+	i.stateAccess.Unlock()
+
 	if i.connectedNotify == nil {
 		return
 	}
@@ -217,6 +264,7 @@ func (i *Inbound) ApplyConfig(version int32, config []byte) ConfigUpdateResult {
 		i.logger.Error("update ingress configuration: ", result.Err)
 		return result
 	}
+	i.resetDirectOriginTransports()
 	i.logger.Info("updated ingress configuration (version ", result.LastAppliedVersion, ")")
 	return result
 }
@@ -234,6 +282,7 @@ func (i *Inbound) Close() error {
 	}
 	i.connections = nil
 	i.connectionAccess.Unlock()
+	i.resetDirectOriginTransports()
 	return nil
 }
 
@@ -247,7 +296,6 @@ func (i *Inbound) superviseConnection(connIndex uint8, edgeAddrs []*EdgeAddr) {
 	defer i.done.Done()
 
 	edgeIndex := initialEdgeAddrIndex(connIndex, len(edgeAddrs))
-	retries := 0
 	for {
 		select {
 		case <-i.ctx.Done():
@@ -256,7 +304,7 @@ func (i *Inbound) superviseConnection(connIndex uint8, edgeAddrs []*EdgeAddr) {
 		}
 
 		edgeAddr := edgeAddrs[edgeIndex]
-		err := i.serveConnection(connIndex, edgeAddr, uint8(retries))
+		err := i.safeServeConnection(connIndex, edgeAddr)
 		if err == nil || i.ctx.Err() != nil {
 			return
 		}
@@ -266,9 +314,9 @@ func (i *Inbound) superviseConnection(connIndex uint8, edgeAddrs []*EdgeAddr) {
 			return
 		}
 
-		retries++
+		retries := i.incrementConnectionRetries(connIndex)
 		edgeIndex = rotateEdgeAddrIndex(edgeIndex, len(edgeAddrs))
-		backoff := backoffDuration(retries)
+		backoff := backoffDuration(int(retries))
 		var retryableErr *RetryableError
 		if errors.As(err, &retryableErr) && retryableErr.Delay > 0 {
 			backoff = retryableErr.Delay
@@ -283,16 +331,10 @@ func (i *Inbound) superviseConnection(connIndex uint8, edgeAddrs []*EdgeAddr) {
 	}
 }
 
-func (i *Inbound) serveConnection(connIndex uint8, edgeAddr *EdgeAddr, numPreviousAttempts uint8) error {
-	protocol := i.protocol
-	// An empty protocol means the user configured "auto". For the token-provided,
-	// remotely-managed tunnel mode we implement here, that intentionally matches
-	// cloudflared's token path: start with QUIC and fall back to HTTP/2 on failure.
-	// If we ever support non-token/local-config modes, that is where remote
-	// percentage-based protocol selection should be introduced.
-	if protocol == "" {
-		protocol = "quic"
-	}
+func (i *Inbound) serveConnection(connIndex uint8, edgeAddr *EdgeAddr) error {
+	state := i.connectionState(connIndex)
+	protocol := state.protocol
+	numPreviousAttempts := state.retries
 	datagramVersion, features := i.currentConnectionFeatures()
 
 	switch protocol {
@@ -304,6 +346,13 @@ func (i *Inbound) serveConnection(connIndex uint8, edgeAddr *EdgeAddr, numPrevio
 		if errors.Is(err, ErrNonRemoteManagedTunnelUnsupported) {
 			return err
 		}
+		if !i.protocolIsAuto() {
+			return err
+		}
+		if i.hasSuccessfulProtocol("quic") {
+			return err
+		}
+		i.setConnectionProtocol(connIndex, "http2")
 		i.logger.Warn("QUIC connection failed, falling back to HTTP/2: ", err)
 		return i.serveHTTP2(connIndex, edgeAddr, features, numPreviousAttempts)
 	case "http2":
@@ -313,14 +362,23 @@ func (i *Inbound) serveConnection(connIndex uint8, edgeAddr *EdgeAddr, numPrevio
 	}
 }
 
+func (i *Inbound) safeServeConnection(connIndex uint8, edgeAddr *EdgeAddr) (err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = E.New("panic in serve connection: ", recovered, "\n", string(debug.Stack()))
+		}
+	}()
+	return i.serveConnection(connIndex, edgeAddr)
+}
+
 func (i *Inbound) serveQUIC(connIndex uint8, edgeAddr *EdgeAddr, datagramVersion string, features []string, numPreviousAttempts uint8) error {
 	i.logger.Info("connecting to edge via QUIC (connection ", connIndex, ")")
 
-	connection, err := NewQUICConnection(
+	connection, err := newQUICConnection(
 		i.ctx, edgeAddr, connIndex,
 		i.credentials, i.connectorID, datagramVersion,
 		features, numPreviousAttempts, i.gracePeriod, i.tunnelDialer, func() {
-			i.notifyConnected(connIndex)
+			i.notifyConnected(connIndex, "quic")
 		}, i.logger,
 	)
 	if err != nil {
@@ -333,7 +391,7 @@ func (i *Inbound) serveQUIC(connIndex uint8, edgeAddr *EdgeAddr, datagramVersion
 		i.RemoveDatagramMuxer(connection)
 	}()
 
-	return connection.Serve(i.ctx, i)
+	return serveQUICConnection(connection, i.ctx, i)
 }
 
 func (i *Inbound) currentConnectionFeatures() (string, []string) {
@@ -350,7 +408,7 @@ func (i *Inbound) currentConnectionFeatures() (string, []string) {
 func (i *Inbound) serveHTTP2(connIndex uint8, edgeAddr *EdgeAddr, features []string, numPreviousAttempts uint8) error {
 	i.logger.Info("connecting to edge via HTTP/2 (connection ", connIndex, ")")
 
-	connection, err := NewHTTP2Connection(
+	connection, err := newHTTP2Connection(
 		i.ctx, edgeAddr, connIndex,
 		i.credentials, i.connectorID,
 		features, numPreviousAttempts, i.gracePeriod, i, i.logger,
@@ -362,7 +420,92 @@ func (i *Inbound) serveHTTP2(connIndex uint8, edgeAddr *EdgeAddr, features []str
 	i.trackConnection(connection)
 	defer i.untrackConnection(connection)
 
-	return connection.Serve(i.ctx)
+	return serveHTTP2Connection(connection, i.ctx)
+}
+
+func (i *Inbound) initializeConnectionState(connIndex uint8) {
+	i.stateAccess.Lock()
+	defer i.stateAccess.Unlock()
+	i.ensureConnectionStateLocked(connIndex)
+	if i.connectionStates[connIndex].protocol == "" {
+		i.connectionStates[connIndex].protocol = i.initialProtocolLocked()
+	}
+}
+
+func (i *Inbound) connectionState(connIndex uint8) connectionState {
+	i.stateAccess.Lock()
+	defer i.stateAccess.Unlock()
+	i.ensureConnectionStateLocked(connIndex)
+	state := i.connectionStates[connIndex]
+	if state.protocol == "" {
+		state.protocol = i.initialProtocolLocked()
+		i.connectionStates[connIndex] = state
+	}
+	return state
+}
+
+func (i *Inbound) incrementConnectionRetries(connIndex uint8) uint8 {
+	i.stateAccess.Lock()
+	defer i.stateAccess.Unlock()
+	i.ensureConnectionStateLocked(connIndex)
+	state := i.connectionStates[connIndex]
+	state.retries++
+	i.connectionStates[connIndex] = state
+	return state.retries
+}
+
+func (i *Inbound) setConnectionProtocol(connIndex uint8, protocol string) {
+	i.stateAccess.Lock()
+	defer i.stateAccess.Unlock()
+	i.ensureConnectionStateLocked(connIndex)
+	state := i.connectionStates[connIndex]
+	state.protocol = protocol
+	i.connectionStates[connIndex] = state
+}
+
+func (i *Inbound) hasSuccessfulProtocol(protocol string) bool {
+	i.stateAccess.Lock()
+	defer i.stateAccess.Unlock()
+	if i.successfulProtocols == nil {
+		return false
+	}
+	_, ok := i.successfulProtocols[protocol]
+	return ok
+}
+
+func (i *Inbound) protocolIsAuto() bool {
+	return i.protocol == ""
+}
+
+func (i *Inbound) ensureConnectionStateLocked(connIndex uint8) {
+	requiredLen := int(connIndex) + 1
+	if len(i.connectionStates) >= requiredLen {
+		return
+	}
+	grown := make([]connectionState, requiredLen)
+	copy(grown, i.connectionStates)
+	i.connectionStates = grown
+}
+
+func (i *Inbound) initialProtocolLocked() string {
+	if i.protocol != "" {
+		return i.protocol
+	}
+	if i.firstSuccessfulProtocol != "" {
+		return i.firstSuccessfulProtocol
+	}
+	return "quic"
+}
+
+func (i *Inbound) resetDirectOriginTransports() {
+	i.directTransportAccess.Lock()
+	transports := i.directTransports
+	i.directTransports = make(map[string]*http.Transport)
+	i.directTransportAccess.Unlock()
+
+	for _, transport := range transports {
+		transport.CloseIdleConnections()
+	}
 }
 
 func (i *Inbound) trackConnection(connection io.Closer) {

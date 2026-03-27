@@ -4,6 +4,7 @@ package cloudflare
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -180,6 +181,43 @@ func writeSocksConnectIPv4(t *testing.T, conn net.Conn, address string) []byte {
 		t.Fatal(err)
 	}
 	return data
+}
+
+func TestServeSocksProxyRejectsMissingNoAuth(t *testing.T) {
+	inboundInstance := newSpecialServiceInbound(t)
+	serverSide, clientSide := net.Pipe()
+	defer clientSide.Close()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- inboundInstance.serveSocksProxy(context.Background(), serverSide, nil)
+	}()
+
+	if _, err := clientSide.Write([]byte{5, 1, 2}); err != nil {
+		t.Fatal(err)
+	}
+	response := make([]byte, 2)
+	if _, err := io.ReadFull(clientSide, response); err != nil {
+		t.Fatal(err)
+	}
+	if string(response) != string([]byte{5, 255}) {
+		t.Fatalf("unexpected auth rejection response: %v", response)
+	}
+	if err := <-errCh; err == nil {
+		t.Fatal("expected socks auth rejection error")
+	}
+}
+
+func TestSocksReplyForDialError(t *testing.T) {
+	if reply := socksReplyForDialError(io.EOF); reply != socksReplyHostUnreachable {
+		t.Fatalf("expected host unreachable for generic error, got %d", reply)
+	}
+	if reply := socksReplyForDialError(errors.New("connection refused")); reply != 5 {
+		t.Fatalf("expected connection refused reply, got %d", reply)
+	}
+	if reply := socksReplyForDialError(errors.New("network is unreachable")); reply != 3 {
+		t.Fatalf("expected network unreachable reply, got %d", reply)
+	}
 }
 
 func TestHandleBastionStream(t *testing.T) {

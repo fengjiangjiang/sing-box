@@ -19,7 +19,7 @@ import (
 )
 
 const (
-	registrationTimeout = 10 * time.Second
+	rpcTimeout = 5 * time.Second
 )
 
 var clientVersion = "sing-box " + C.Version
@@ -63,7 +63,7 @@ func (c *RegistrationClient) RegisterConnection(
 	connIndex uint8,
 	options *RegistrationConnectionOptions,
 ) (*RegistrationResult, error) {
-	ctx, cancel := context.WithTimeout(ctx, registrationTimeout)
+	ctx, cancel := context.WithTimeout(ctx, rpcTimeout)
 	defer cancel()
 
 	promise := c.client.RegisterConnection(ctx, func(p tunnelrpc.RegistrationServer_registerConnection_Params) error {
@@ -147,8 +147,6 @@ func (c *RegistrationClient) RegisterConnection(
 
 // Unregister sends the UnregisterConnection RPC.
 func (c *RegistrationClient) Unregister(ctx context.Context) error {
-	ctx, cancel := context.WithTimeout(ctx, registrationTimeout)
-	defer cancel()
 	promise := c.client.UnregisterConnection(ctx, nil)
 	_, err := promise.Struct()
 	return err

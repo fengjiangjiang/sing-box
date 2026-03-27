@@ -40,16 +40,23 @@ func newLimitedInbound(t *testing.T, limit uint64) *Inbound {
 	if err != nil {
 		t.Fatal(err)
 	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
 	config := configManager.Snapshot()
 	config.WarpRouting.MaxActiveFlows = limit
 	configManager.activeConfig = config
 	return &Inbound{
-		Adapter:           inbound.NewAdapter(C.TypeCloudflared, "test"),
-		router:            &testRouter{},
-		logger:            logFactory.NewLogger("test"),
-		configManager:     configManager,
-		flowLimiter:       &FlowLimiter{},
-		datagramV3Manager: NewDatagramV3SessionManager(),
+		Adapter:             inbound.NewAdapter(C.TypeCloudflared, "test"),
+		ctx:                 ctx,
+		cancel:              cancel,
+		router:              &testRouter{},
+		logger:              logFactory.NewLogger("test"),
+		configManager:       configManager,
+		flowLimiter:         &FlowLimiter{},
+		datagramV3Manager:   NewDatagramV3SessionManager(),
+		connectionStates:    make([]connectionState, 1),
+		successfulProtocols: make(map[string]struct{}),
+		directTransports:    make(map[string]*http.Transport),
 	}
 }
 

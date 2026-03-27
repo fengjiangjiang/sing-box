@@ -19,6 +19,7 @@ import (
 
 	"github.com/google/uuid"
 	"zombiezen.com/go/capnproto2/rpc"
+	"zombiezen.com/go/capnproto2/server"
 )
 
 // V2 wire format: [payload | 16B sessionID | 1B type] (suffix-based)
@@ -204,7 +205,7 @@ func (m *DatagramV2Muxer) RegisterSession(
 }
 
 // UnregisterSession removes a UDP session.
-func (m *DatagramV2Muxer) UnregisterSession(sessionID uuid.UUID) {
+func (m *DatagramV2Muxer) UnregisterSession(sessionID uuid.UUID, message string) {
 	m.sessionAccess.Lock()
 	session, exists := m.sessions[sessionID]
 	if exists {
@@ -213,7 +214,7 @@ func (m *DatagramV2Muxer) UnregisterSession(sessionID uuid.UUID) {
 	m.sessionAccess.Unlock()
 
 	if exists {
-		session.markRemoteClosed()
+		session.markRemoteClosed(message)
 		session.close()
 		m.logger.Info("unregistered V2 UDP session ", sessionID)
 	}
@@ -231,7 +232,7 @@ func (m *DatagramV2Muxer) serveSession(ctx context.Context, session *udpSession,
 	m.sessionAccess.Unlock()
 
 	if !session.remoteClosed() {
-		unregisterCtx, cancel := context.WithTimeout(context.Background(), registrationTimeout)
+		unregisterCtx, cancel := context.WithTimeout(context.Background(), rpcTimeout)
 		defer cancel()
 		if err := m.unregisterRemoteSession(unregisterCtx, session.id, session.closeReason()); err != nil {
 			m.logger.Debug("failed to unregister V2 UDP session ", session.id, ": ", err)
@@ -388,10 +389,12 @@ func (s *udpSession) closeWithReason(reason string) {
 	s.close()
 }
 
-func (s *udpSession) markRemoteClosed() {
+func (s *udpSession) markRemoteClosed(message string) {
 	s.stateAccess.Lock()
 	s.closedByRemote = true
-	if s.closeReasonString == "" {
+	if message != "" {
+		s.closeReasonString = message
+	} else if s.closeReasonString == "" {
 		s.closeReasonString = "unregistered by edge"
 	}
 	s.stateAccess.Unlock()
@@ -458,6 +461,7 @@ type cloudflaredServer struct {
 }
 
 func (s *cloudflaredServer) RegisterUdpSession(call tunnelrpc.SessionManager_registerUdpSession) error {
+	server.Ack(call.Options)
 	sessionIDBytes, err := call.Params.SessionId()
 	if err != nil {
 		return err
@@ -494,6 +498,7 @@ func (s *cloudflaredServer) RegisterUdpSession(call tunnelrpc.SessionManager_reg
 }
 
 func (s *cloudflaredServer) UnregisterUdpSession(call tunnelrpc.SessionManager_unregisterUdpSession) error {
+	server.Ack(call.Options)
 	sessionIDBytes, err := call.Params.SessionId()
 	if err != nil {
 		return err
@@ -503,11 +508,17 @@ func (s *cloudflaredServer) UnregisterUdpSession(call tunnelrpc.SessionManager_u
 		return err
 	}
 
-	s.muxer.UnregisterSession(sessionID)
+	message, err := call.Params.Message()
+	if err != nil {
+		return err
+	}
+
+	s.muxer.UnregisterSession(sessionID, message)
 	return nil
 }
 
 func (s *cloudflaredServer) UpdateConfiguration(call tunnelrpc.ConfigurationManager_updateConfiguration) error {
+	server.Ack(call.Options)
 	version := call.Params.Version()
 	configData, _ := call.Params.Config()
 	updateResult := s.inbound.ApplyConfig(version, configData)
@@ -535,7 +546,12 @@ func ServeRPCStream(ctx context.Context, stream io.ReadWriteCloser, inbound *Inb
 	client := tunnelrpc.CloudflaredServer_ServerToClient(srv)
 	transport := safeTransport(stream)
 	rpcConn := newRPCServerConn(transport, client.Client)
-	<-rpcConn.Done()
+	rpcCtx, cancel := context.WithTimeout(ctx, rpcTimeout)
+	defer cancel()
+	select {
+	case <-rpcConn.Done():
+	case <-rpcCtx.Done():
+	}
 	E.Errors(
 		rpcConn.Close(),
 		transport.Close(),

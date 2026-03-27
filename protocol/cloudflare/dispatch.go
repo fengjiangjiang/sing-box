@@ -5,6 +5,7 @@ package cloudflare
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"io"
 	"net"
 	"net/http"
@@ -380,7 +381,6 @@ func (i *Inbound) roundTripHTTP(ctx context.Context, stream io.ReadWriteCloser, 
 			return http.ErrUseLastResponse
 		},
 	}
-	defer httpClient.CloseIdleConnections()
 
 	response, err := httpClient.Do(httpRequest)
 	if err != nil {
@@ -444,6 +444,21 @@ func (i *Inbound) newRouterOriginTransport(ctx context.Context, metadata adapter
 }
 
 func (i *Inbound) newDirectOriginTransport(service ResolvedService, requestHost string) (*http.Transport, func(), error) {
+	cacheKey, err := directOriginTransportKey(service, requestHost)
+	if err != nil {
+		return nil, nil, E.Cause(err, "marshal direct origin transport key")
+	}
+
+	i.directTransportAccess.Lock()
+	if i.directTransports == nil {
+		i.directTransports = make(map[string]*http.Transport)
+	}
+	if transport, exists := i.directTransports[cacheKey]; exists {
+		i.directTransportAccess.Unlock()
+		return transport, func() {}, nil
+	}
+	i.directTransportAccess.Unlock()
+
 	dialer := &net.Dialer{
 		Timeout:   service.OriginRequest.ConnectTimeout,
 		KeepAlive: service.OriginRequest.TCPKeepAlive,
@@ -473,7 +488,40 @@ func (i *Inbound) newDirectOriginTransport(service ResolvedService, requestHost 
 	default:
 		return nil, nil, E.New("unsupported direct origin service")
 	}
+
+	i.directTransportAccess.Lock()
+	if i.directTransports == nil {
+		i.directTransports = make(map[string]*http.Transport)
+	}
+	if cached, exists := i.directTransports[cacheKey]; exists {
+		i.directTransportAccess.Unlock()
+		transport.CloseIdleConnections()
+		return cached, func() {}, nil
+	}
+	i.directTransports[cacheKey] = transport
+	i.directTransportAccess.Unlock()
 	return transport, func() {}, nil
+}
+
+type directOriginTransportCacheKey struct {
+	Kind        ResolvedServiceKind `json:"kind"`
+	UnixPath    string              `json:"unix_path,omitempty"`
+	RequestHost string              `json:"request_host,omitempty"`
+	Origin      OriginRequestConfig `json:"origin"`
+}
+
+func directOriginTransportKey(service ResolvedService, requestHost string) (string, error) {
+	key := directOriginTransportCacheKey{
+		Kind:        service.Kind,
+		UnixPath:    service.UnixPath,
+		RequestHost: effectiveOriginHost(service.OriginRequest, requestHost),
+		Origin:      service.OriginRequest,
+	}
+	data, err := json.Marshal(key)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
 }
 
 func effectiveOriginHost(originRequest OriginRequestConfig, requestHost string) string {

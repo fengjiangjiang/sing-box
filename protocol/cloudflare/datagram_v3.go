@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"net/netip"
+	"os"
 	"sync"
 	"time"
 
@@ -183,7 +184,7 @@ func (m *DatagramV3Muxer) handleRegistration(ctx context.Context, data []byte) {
 }
 
 func (m *DatagramV3Muxer) handlePayload(data []byte) {
-	if len(data) < v3RequestIDLength {
+	if len(data) < v3RequestIDLength || len(data) > v3RequestIDLength+maxV3UDPPayloadLen {
 		return
 	}
 
@@ -390,6 +391,10 @@ func (s *v3Session) writeLoop() {
 		case payload := <-s.writeChan:
 			err := s.origin.WritePacket(buf.As(payload), M.SocksaddrFromNetIP(s.destination))
 			if err != nil {
+				if errors.Is(err, os.ErrDeadlineExceeded) {
+					s.inbound.logger.Debug("drop V3 UDP payload due to write deadline exceeded")
+					continue
+				}
 				s.close()
 				return
 			}
