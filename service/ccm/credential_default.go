@@ -813,6 +813,26 @@ func (c *defaultCredential) planWeight() float64 {
 	return ccmPlanWeight(c.state.accountType, c.state.rateLimitTier)
 }
 
+func (c *defaultCredential) weeklyBurnFactor() float64 {
+	c.stateAccess.RLock()
+	fiveHourUtilization := c.state.fiveHourUtilization
+	weeklyUtilization := c.state.weeklyUtilization
+	fiveHourReset := c.state.fiveHourReset
+	weeklyReset := c.state.weeklyReset
+	rateLimitTier := c.state.rateLimitTier
+	c.stateAccess.RUnlock()
+	return computeCredentialWeeklyBurnFactor(
+		time.Now(),
+		fiveHourReset,
+		weeklyReset,
+		fiveHourUtilization,
+		weeklyUtilization,
+		c.cap5h,
+		c.capWeekly,
+		ccmPlanWeight5h(rateLimitTier),
+	)
+}
+
 func (c *defaultCredential) fiveHourResetTime() time.Time {
 	c.stateAccess.RLock()
 	defer c.stateAccess.RUnlock()

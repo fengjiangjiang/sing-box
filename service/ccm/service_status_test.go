@@ -21,21 +21,28 @@ type testCredential struct {
 	fiveHourCapV float64
 	weeklyCapV   float64
 	weight       float64
+	burnFactor   float64
 	fiveReset    time.Time
 	weeklyReset  time.Time
 	availability availabilityStatus
 }
 
-func (c *testCredential) tagName() string                        { return c.tag }
-func (c *testCredential) isAvailable() bool                      { return c.available }
-func (c *testCredential) isUsable() bool                         { return c.usable }
-func (c *testCredential) isExternal() bool                       { return c.external }
-func (c *testCredential) hasSnapshotData() bool                  { return c.hasData }
-func (c *testCredential) fiveHourUtilization() float64           { return c.fiveHour }
-func (c *testCredential) weeklyUtilization() float64             { return c.weekly }
-func (c *testCredential) fiveHourCap() float64                   { return c.fiveHourCapV }
-func (c *testCredential) weeklyCap() float64                     { return c.weeklyCapV }
-func (c *testCredential) planWeight() float64                    { return c.weight }
+func (c *testCredential) tagName() string              { return c.tag }
+func (c *testCredential) isAvailable() bool            { return c.available }
+func (c *testCredential) isUsable() bool               { return c.usable }
+func (c *testCredential) isExternal() bool             { return c.external }
+func (c *testCredential) hasSnapshotData() bool        { return c.hasData }
+func (c *testCredential) fiveHourUtilization() float64 { return c.fiveHour }
+func (c *testCredential) weeklyUtilization() float64   { return c.weekly }
+func (c *testCredential) fiveHourCap() float64         { return c.fiveHourCapV }
+func (c *testCredential) weeklyCap() float64           { return c.weeklyCapV }
+func (c *testCredential) planWeight() float64          { return c.weight }
+func (c *testCredential) weeklyBurnFactor() float64 {
+	if c.burnFactor > 0 {
+		return c.burnFactor
+	}
+	return ccmWeeklyBurnFactorMin
+}
 func (c *testCredential) fiveHourResetTime() time.Time           { return c.fiveReset }
 func (c *testCredential) weeklyResetTime() time.Time             { return c.weeklyReset }
 func (c *testCredential) markRateLimited(time.Time)              {}
@@ -66,9 +73,11 @@ type testProvider struct {
 func (p *testProvider) selectCredential(string, credentialSelection) (Credential, bool, error) {
 	return nil, false, nil
 }
+
 func (p *testProvider) onRateLimited(string, Credential, time.Time, credentialSelection) Credential {
 	return nil
 }
+
 func (p *testProvider) linkProviderInterrupt(Credential, credentialSelection, func()) func() bool {
 	return func() bool { return true }
 }
@@ -205,6 +214,41 @@ func TestRewriteResponseHeadersRejectedOnHardRateLimit(t *testing.T) {
 
 	if headers.Get("anthropic-ratelimit-unified-status") != "rejected" {
 		t.Fatalf("expected rejected (hard rate limited), got %q", headers.Get("anthropic-ratelimit-unified-status"))
+	}
+}
+
+func TestComputeAggregatedUtilizationAggregatesWeeklyBurnFactor(t *testing.T) {
+	t.Parallel()
+
+	service := &Service{}
+	status := service.computeAggregatedUtilization(&testProvider{credentials: []Credential{
+		&testCredential{
+			tag:          "a",
+			available:    true,
+			usable:       true,
+			hasData:      true,
+			weekly:       80,
+			weeklyCapV:   100,
+			weight:       1,
+			burnFactor:   1.2,
+			availability: availabilityStatus{State: availabilityStateUsable},
+		},
+		&testCredential{
+			tag:          "b",
+			available:    true,
+			usable:       true,
+			hasData:      true,
+			weekly:       40,
+			weeklyCapV:   100,
+			weight:       2,
+			burnFactor:   1.8,
+			availability: availabilityStatus{State: availabilityStateUsable},
+		},
+	}}, nil)
+
+	expected := (20*1*1.2 + 60*2*1.8) / (20*1 + 60*2)
+	if diff := status.weeklyBurnFactor - expected; diff < -0.000001 || diff > 0.000001 {
+		t.Fatalf("expected weekly burn factor %v, got %v", expected, status.weeklyBurnFactor)
 	}
 }
 

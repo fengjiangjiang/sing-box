@@ -18,6 +18,7 @@ type statusPayload struct {
 	WeeklyUtilization   float64 `json:"weekly_utilization"`
 	WeeklyReset         int64   `json:"weekly_reset"`
 	PlanWeight          float64 `json:"plan_weight"`
+	WeeklyBurnFactor    float64 `json:"weekly_burn_factor"`
 }
 
 type aggregatedStatus struct {
@@ -26,6 +27,7 @@ type aggregatedStatus struct {
 	totalWeight         float64
 	fiveHourReset       time.Time
 	weeklyReset         time.Time
+	weeklyBurnFactor    float64
 	availability        availabilityStatus
 }
 
@@ -41,12 +43,17 @@ func (s aggregatedStatus) equal(other aggregatedStatus) bool {
 }
 
 func (s aggregatedStatus) toPayload() statusPayload {
+	weeklyBurnFactor := s.weeklyBurnFactor
+	if weeklyBurnFactor <= 0 {
+		weeklyBurnFactor = ccmWeeklyBurnFactorMin
+	}
 	return statusPayload{
 		FiveHourUtilization: s.fiveHourUtilization,
 		FiveHourReset:       resetToEpoch(s.fiveHourReset),
 		WeeklyUtilization:   s.weeklyUtilization,
 		WeeklyReset:         resetToEpoch(s.weeklyReset),
 		PlanWeight:          s.totalWeight,
+		WeeklyBurnFactor:    weeklyBurnFactor,
 	}
 }
 
@@ -273,6 +280,7 @@ func (s *Service) handleStatusStream(w http.ResponseWriter, r *http.Request, pro
 func (s *Service) computeAggregatedUtilization(provider credentialProvider, userConfig *option.CCMUser) aggregatedStatus {
 	visibleInputs := make([]aggregateInput, 0, len(provider.allCredentials()))
 	var totalWeightedRemaining5h, totalWeightedRemainingWeekly, totalWeight float64
+	var totalBurnBase, totalWeightedBurnFactor float64
 	now := time.Now()
 	var totalWeightedHoursUntil5hReset, total5hResetWeight float64
 	var totalWeightedHoursUntilWeeklyReset, totalWeeklyResetWeight float64
@@ -303,6 +311,15 @@ func (s *Service) computeAggregatedUtilization(provider credentialProvider, user
 		totalWeightedRemaining5h += remaining5h * weight
 		totalWeightedRemainingWeekly += remainingWeekly * weight
 		totalWeight += weight
+		burnBase := remainingWeekly * weight
+		totalBurnBase += burnBase
+		weeklyBurnFactor := credential.weeklyBurnFactor()
+		if weeklyBurnFactor < ccmWeeklyBurnFactorMin {
+			weeklyBurnFactor = ccmWeeklyBurnFactorMin
+		} else if weeklyBurnFactor > ccmWeeklyBurnFactorMax {
+			weeklyBurnFactor = ccmWeeklyBurnFactorMax
+		}
+		totalWeightedBurnFactor += burnBase * weeklyBurnFactor
 
 		fiveHourReset := credential.fiveHourResetTime()
 		if !fiveHourReset.IsZero() {
@@ -334,7 +351,11 @@ func (s *Service) computeAggregatedUtilization(provider credentialProvider, user
 		fiveHourUtilization: 100 - totalWeightedRemaining5h/totalWeight,
 		weeklyUtilization:   100 - totalWeightedRemainingWeekly/totalWeight,
 		totalWeight:         totalWeight,
+		weeklyBurnFactor:    ccmWeeklyBurnFactorMin,
 		availability:        availability,
+	}
+	if totalBurnBase > 0 {
+		result.weeklyBurnFactor = totalWeightedBurnFactor / totalBurnBase
 	}
 	if total5hResetWeight > 0 {
 		avgHours := totalWeightedHoursUntil5hReset / total5hResetWeight

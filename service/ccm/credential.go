@@ -68,6 +68,7 @@ type credentialState struct {
 	rateLimitTier             string
 	oauthAccount              *claudeOAuthAccount
 	remotePlanWeight          float64
+	remoteWeeklyBurnFactor    float64
 	lastUpdated               time.Time
 	consecutivePollFailures   int
 	usageAPIRetryDelay        time.Duration
@@ -113,6 +114,7 @@ type Credential interface {
 	fiveHourCap() float64
 	weeklyCap() float64
 	planWeight() float64
+	weeklyBurnFactor() float64
 	fiveHourResetTime() time.Time
 	weeklyResetTime() time.Time
 	markRateLimited(resetAt time.Time)
@@ -243,7 +245,6 @@ func (s credentialState) currentAvailability() availabilityStatus {
 		return availabilityStatus{State: availabilityStateUsable}
 	}
 }
-
 
 func parseRateLimitResetFromHeaders(headers http.Header) time.Time {
 	claim := headers.Get("anthropic-ratelimit-unified-representative-claim")

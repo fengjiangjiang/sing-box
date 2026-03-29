@@ -319,6 +319,15 @@ func (c *externalCredential) planWeight() float64 {
 	return 10
 }
 
+func (c *externalCredential) weeklyBurnFactor() float64 {
+	c.stateAccess.RLock()
+	defer c.stateAccess.RUnlock()
+	if c.state.remoteWeeklyBurnFactor > 0 {
+		return c.state.remoteWeeklyBurnFactor
+	}
+	return ccmWeeklyBurnFactorMin
+}
+
 func (c *externalCredential) fiveHourResetTime() time.Time {
 	c.stateAccess.RLock()
 	defer c.stateAccess.RUnlock()
@@ -647,6 +656,11 @@ func (c *externalCredential) pollUsage() {
 	if statusResponse.PlanWeight > 0 {
 		c.state.remotePlanWeight = statusResponse.PlanWeight
 	}
+	if statusResponse.WeeklyBurnFactor > 0 {
+		c.state.remoteWeeklyBurnFactor = statusResponse.WeeklyBurnFactor
+	} else {
+		c.state.remoteWeeklyBurnFactor = ccmWeeklyBurnFactorMin
+	}
 	if statusResponse.FiveHourReset > 0 {
 		c.state.fiveHourReset = time.Unix(statusResponse.FiveHourReset, 0)
 	}
@@ -756,6 +770,11 @@ func (c *externalCredential) connectStatusStream(ctx context.Context) (statusStr
 		if statusResponse.PlanWeight > 0 {
 			c.state.remotePlanWeight = statusResponse.PlanWeight
 		}
+		if statusResponse.WeeklyBurnFactor > 0 {
+			c.state.remoteWeeklyBurnFactor = statusResponse.WeeklyBurnFactor
+		} else {
+			c.state.remoteWeeklyBurnFactor = ccmWeeklyBurnFactorMin
+		}
 		if statusResponse.FiveHourReset > 0 {
 			c.state.fiveHourReset = time.Unix(statusResponse.FiveHourReset, 0)
 		}
@@ -844,7 +863,6 @@ func (c *externalCredential) availabilityStatus() availabilityStatus {
 	defer c.stateAccess.RUnlock()
 	return c.state.currentAvailability()
 }
-
 
 func (c *externalCredential) markUsageStreamUpdated() {
 	c.stateAccess.Lock()
