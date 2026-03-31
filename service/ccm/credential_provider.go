@@ -300,6 +300,7 @@ func (p *balancerProvider) pickFallback(filter func(Credential) bool) Credential
 func (p *balancerProvider) pickLeastUsed(filter func(Credential) bool) Credential {
 	var best Credential
 	bestScore := float64(-1)
+	now := time.Now()
 	for _, credential := range p.credentials {
 		if filter != nil && !filter(credential) {
 			continue
@@ -308,6 +309,9 @@ func (p *balancerProvider) pickLeastUsed(filter func(Credential) bool) Credentia
 			continue
 		}
 		remaining := credential.weeklyCap() - credential.weeklyUtilization()
+		if resetTime := credential.weeklyResetTime(); !resetTime.IsZero() && !now.Before(resetTime) {
+			remaining = credential.weeklyCap()
+		}
 		score := remaining * credential.planWeight() * credential.weeklyBurnFactor()
 		if score > bestScore {
 			bestScore = score

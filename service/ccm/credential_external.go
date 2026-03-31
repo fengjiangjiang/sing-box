@@ -280,14 +280,19 @@ func (c *externalCredential) isUsable() bool {
 		if c.state.hardRateLimited && !time.Now().Before(c.state.rateLimitResetAt) {
 			c.state.hardRateLimited = false
 		}
-		// No reserve for external: only 100% is unusable
-		usable := c.state.fiveHourUtilization < 100 && c.state.weeklyUtilization < 100
+		usable := c.checkExternalReservesLocked()
 		c.stateAccess.Unlock()
 		return usable
 	}
-	usable := c.state.fiveHourUtilization < 100 && c.state.weeklyUtilization < 100
+	usable := c.checkExternalReservesLocked()
 	c.stateAccess.RUnlock()
 	return usable
+}
+
+// checkExternalReservesLocked checks reserves with no reserve margin:
+// only 100% utilization is considered unusable for external credentials.
+func (c *externalCredential) checkExternalReservesLocked() bool {
+	return c.state.checkReserves(100, 100)
 }
 
 func (c *externalCredential) fiveHourUtilization() float64 {
@@ -519,7 +524,7 @@ func (c *externalCredential) updateStateFromHeaders(headers http.Header) {
 
 func (c *externalCredential) checkTransitionLocked() bool {
 	upstreamRejected := !c.state.upstreamRejectedUntil.IsZero() && time.Now().Before(c.state.upstreamRejectedUntil)
-	unusable := c.state.hardRateLimited || c.state.fiveHourUtilization >= 100 || c.state.weeklyUtilization >= 100 || c.state.consecutivePollFailures > 0 || upstreamRejected
+	unusable := c.state.hardRateLimited || !c.checkExternalReservesLocked() || c.state.consecutivePollFailures > 0 || upstreamRejected
 	if unusable && !c.interrupted {
 		c.interrupted = true
 		return true
@@ -729,7 +734,7 @@ func (c *externalCredential) connectStatusStream(ctx context.Context) (statusStr
 	if response.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(response.Body)
 		result.duration = time.Since(startTime)
-		return result, E.New("status ", response.StatusCode, " ", string(body))
+		return result, &statusStreamHTTPError{code: response.StatusCode, body: string(body)}
 	}
 
 	decoder := json.NewDecoder(response.Body)
@@ -802,8 +807,24 @@ func (c *externalCredential) connectStatusStream(ctx context.Context) (statusStr
 	}
 }
 
+type statusStreamHTTPError struct {
+	code int
+	body string
+}
+
+func (e *statusStreamHTTPError) Error() string {
+	return "status " + strconv.Itoa(e.code) + " " + e.body
+}
+
 func shouldRetryStatusStreamError(err error) bool {
-	return errors.Is(err, io.ErrUnexpectedEOF) || E.IsClosedOrCanceled(err)
+	if err == nil {
+		return false
+	}
+	var httpErr *statusStreamHTTPError
+	if errors.As(err, &httpErr) {
+		return httpErr.code != http.StatusUnauthorized && httpErr.code != http.StatusForbidden
+	}
+	return true
 }
 
 func (c *externalCredential) nextStatusStreamBackoff(result statusStreamResult, consecutiveFailures int) (int, time.Duration) {

@@ -78,6 +78,21 @@ type credentialState struct {
 	lastCredentialLoadError   string
 }
 
+func (s *credentialState) checkReserves(cap5h, capWeekly float64) bool {
+	now := time.Now()
+	if s.fiveHourUtilization >= cap5h {
+		if s.fiveHourReset.IsZero() || now.Before(s.fiveHourReset) {
+			return false
+		}
+	}
+	if s.weeklyUtilization >= capWeekly {
+		if s.weeklyReset.IsZero() || now.Before(s.weeklyReset) {
+			return false
+		}
+	}
+	return true
+}
+
 type credentialRequestContext struct {
 	context.Context
 	releaseOnce  sync.Once

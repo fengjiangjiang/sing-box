@@ -445,13 +445,7 @@ func (c *defaultCredential) isUsable() bool {
 }
 
 func (c *defaultCredential) checkReservesLocked() bool {
-	if c.state.fiveHourUtilization >= c.cap5h {
-		return false
-	}
-	if c.state.weeklyUtilization >= c.capWeekly {
-		return false
-	}
-	return true
+	return c.state.checkReserves(c.cap5h, c.capWeekly)
 }
 
 // checkTransitionLocked detects usable->unusable transition.
@@ -718,6 +712,7 @@ func (c *defaultCredential) pollUsage() {
 			c.stateAccess.Lock()
 			c.state.usageAPIRetryDelay = retryDelay
 			c.stateAccess.Unlock()
+			c.emitStatusUpdate()
 			return
 		}
 		body, _ := io.ReadAll(response.Body)

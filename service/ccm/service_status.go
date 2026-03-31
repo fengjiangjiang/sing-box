@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"net/http"
-	"reflect"
 	"strconv"
 	"strings"
 	"time"
@@ -22,13 +21,14 @@ type statusPayload struct {
 }
 
 type aggregatedStatus struct {
-	fiveHourUtilization float64
-	weeklyUtilization   float64
-	totalWeight         float64
-	fiveHourReset       time.Time
-	weeklyReset         time.Time
-	weeklyBurnFactor    float64
-	availability        availabilityStatus
+	fiveHourUtilization    float64
+	weeklyUtilization      float64
+	totalWeight            float64
+	fiveHourReset          time.Time
+	weeklyReset            time.Time
+	weeklyBurnFactor       float64
+	earliestCredentialReset time.Time
+	availability           availabilityStatus
 }
 
 func resetToEpoch(t time.Time) int64 {
@@ -39,7 +39,11 @@ func resetToEpoch(t time.Time) int64 {
 }
 
 func (s aggregatedStatus) equal(other aggregatedStatus) bool {
-	return reflect.DeepEqual(s.toPayload(), other.toPayload())
+	return s.toPayload() == other.toPayload()
+}
+
+func (s aggregatedStatus) nextResetTime() time.Time {
+	return s.earliestCredentialReset
 }
 
 func (s aggregatedStatus) toPayload() statusPayload {
@@ -246,12 +250,47 @@ func (s *Service) handleStatusStream(w http.ResponseWriter, r *http.Request, pro
 	}
 	flusher.Flush()
 
+	var resetTimer *time.Timer
+	var resetCh <-chan time.Time
+	if nextReset := last.nextResetTime(); !nextReset.IsZero() {
+		resetTimer = time.NewTimer(time.Until(nextReset))
+		resetCh = resetTimer.C
+	}
+	defer func() {
+		if resetTimer != nil {
+			resetTimer.Stop()
+		}
+	}()
+
+	pollTimer := time.NewTimer(nextWatchPollDelay(provider))
+	defer pollTimer.Stop()
+
 	for {
 		select {
 		case <-r.Context().Done():
 			return
 		case <-done:
 			return
+		case <-resetCh:
+			resetCh = nil
+			current := s.computeAggregatedUtilization(provider, userConfig)
+			if !current.equal(last) {
+				buf.Reset()
+				json.NewEncoder(buf).Encode(current.toPayload())
+				_, writeErr = w.Write(buf.Bytes())
+				if writeErr != nil {
+					return
+				}
+				flusher.Flush()
+			}
+			last = current
+			if nextReset := current.nextResetTime(); !nextReset.IsZero() {
+				resetTimer.Reset(time.Until(nextReset))
+				resetCh = resetTimer.C
+			}
+		case <-pollTimer.C:
+			provider.pollIfStale()
+			pollTimer.Reset(nextWatchPollDelay(provider))
 		case <-subscription:
 			for {
 				select {
@@ -261,20 +300,53 @@ func (s *Service) handleStatusStream(w http.ResponseWriter, r *http.Request, pro
 				}
 			}
 		drained:
+			if !pollTimer.Stop() {
+				select {
+				case <-pollTimer.C:
+				default:
+				}
+			}
+			pollTimer.Reset(nextWatchPollDelay(provider))
 			current := s.computeAggregatedUtilization(provider, userConfig)
-			if current.equal(last) {
+			payloadChanged := !current.equal(last)
+			resetChanged := !current.earliestCredentialReset.Equal(last.earliestCredentialReset)
+			if !payloadChanged && !resetChanged {
 				continue
 			}
 			last = current
-			buf.Reset()
-			json.NewEncoder(buf).Encode(current.toPayload())
-			_, writeErr = w.Write(buf.Bytes())
-			if writeErr != nil {
-				return
+			if payloadChanged {
+				buf.Reset()
+				json.NewEncoder(buf).Encode(current.toPayload())
+				_, writeErr = w.Write(buf.Bytes())
+				if writeErr != nil {
+					return
+				}
+				flusher.Flush()
 			}
-			flusher.Flush()
+			if resetTimer != nil {
+				resetTimer.Stop()
+			}
+			resetCh = nil
+			if nextReset := last.nextResetTime(); !nextReset.IsZero() {
+				resetTimer = time.NewTimer(time.Until(nextReset))
+				resetCh = resetTimer.C
+			}
 		}
 	}
+}
+
+func nextWatchPollDelay(provider credentialProvider) time.Duration {
+	next := defaultPollInterval
+	for _, cred := range provider.allCredentials() {
+		remaining := cred.pollBackoff(defaultPollInterval) - time.Since(cred.lastUpdatedTime())
+		if remaining < next {
+			next = remaining
+		}
+	}
+	if next < time.Second {
+		next = time.Second
+	}
+	return next
 }
 
 func (s *Service) computeAggregatedUtilization(provider credentialProvider, userConfig *option.CCMUser) aggregatedStatus {
@@ -284,6 +356,7 @@ func (s *Service) computeAggregatedUtilization(provider credentialProvider, user
 	now := time.Now()
 	var totalWeightedHoursUntil5hReset, total5hResetWeight float64
 	var totalWeightedHoursUntilWeeklyReset, totalWeeklyResetWeight float64
+	var earliestCredentialReset time.Time
 	var hasSnapshotData bool
 	for _, credential := range provider.allCredentials() {
 		if userConfig != nil && userConfig.ExternalCredential != "" && credential.tagName() == userConfig.ExternalCredential {
@@ -300,13 +373,21 @@ func (s *Service) computeAggregatedUtilization(provider credentialProvider, user
 		}
 		hasSnapshotData = true
 		weight := credential.planWeight()
+		fiveHourReset := credential.fiveHourResetTime()
 		remaining5h := credential.fiveHourCap() - credential.fiveHourUtilization()
 		if remaining5h < 0 {
 			remaining5h = 0
 		}
+		if !fiveHourReset.IsZero() && !now.Before(fiveHourReset) {
+			remaining5h = credential.fiveHourCap()
+		}
+		weeklyReset := credential.weeklyResetTime()
 		remainingWeekly := credential.weeklyCap() - credential.weeklyUtilization()
 		if remainingWeekly < 0 {
 			remainingWeekly = 0
+		}
+		if !weeklyReset.IsZero() && !now.Before(weeklyReset) {
+			remainingWeekly = credential.weeklyCap()
 		}
 		totalWeightedRemaining5h += remaining5h * weight
 		totalWeightedRemainingWeekly += remainingWeekly * weight
@@ -321,20 +402,24 @@ func (s *Service) computeAggregatedUtilization(provider credentialProvider, user
 		}
 		totalWeightedBurnFactor += burnBase * weeklyBurnFactor
 
-		fiveHourReset := credential.fiveHourResetTime()
 		if !fiveHourReset.IsZero() {
 			hours := fiveHourReset.Sub(now).Hours()
 			if hours > 0 {
 				totalWeightedHoursUntil5hReset += hours * weight
 				total5hResetWeight += weight
+				if earliestCredentialReset.IsZero() || fiveHourReset.Before(earliestCredentialReset) {
+					earliestCredentialReset = fiveHourReset
+				}
 			}
 		}
-		weeklyReset := credential.weeklyResetTime()
 		if !weeklyReset.IsZero() {
 			hours := weeklyReset.Sub(now).Hours()
 			if hours > 0 {
 				totalWeightedHoursUntilWeeklyReset += hours * weight
 				totalWeeklyResetWeight += weight
+				if earliestCredentialReset.IsZero() || weeklyReset.Before(earliestCredentialReset) {
+					earliestCredentialReset = weeklyReset
+				}
 			}
 		}
 	}
@@ -348,11 +433,12 @@ func (s *Service) computeAggregatedUtilization(provider credentialProvider, user
 		return result
 	}
 	result := aggregatedStatus{
-		fiveHourUtilization: 100 - totalWeightedRemaining5h/totalWeight,
-		weeklyUtilization:   100 - totalWeightedRemainingWeekly/totalWeight,
-		totalWeight:         totalWeight,
-		weeklyBurnFactor:    ccmWeeklyBurnFactorMin,
-		availability:        availability,
+		fiveHourUtilization:     100 - totalWeightedRemaining5h/totalWeight,
+		weeklyUtilization:       100 - totalWeightedRemainingWeekly/totalWeight,
+		totalWeight:             totalWeight,
+		weeklyBurnFactor:        ccmWeeklyBurnFactorMin,
+		earliestCredentialReset: earliestCredentialReset,
+		availability:            availability,
 	}
 	if totalBurnBase > 0 {
 		result.weeklyBurnFactor = totalWeightedBurnFactor / totalBurnBase

@@ -321,8 +321,11 @@ func (p *balancerProvider) pickLeastUsed(filter func(Credential) bool) Credentia
 			continue
 		}
 		remaining := credential.weeklyCap() - credential.weeklyUtilization()
-		score := remaining * credential.planWeight()
 		resetTime := credential.weeklyResetTime()
+		if !resetTime.IsZero() && !now.Before(resetTime) {
+			remaining = credential.weeklyCap()
+		}
+		score := remaining * credential.planWeight()
 		if !resetTime.IsZero() {
 			timeUntilReset := resetTime.Sub(now)
 			if timeUntilReset < time.Hour {
