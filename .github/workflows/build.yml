@@ -28,6 +28,9 @@ jobs:
       - name: Setup OpenJDK
         run: |
           sudo apt update && sudo apt install -y openjdk-17-jdk-headless
+      - name: Set version tag
+        run: |
+          git tag v${{ github.event.inputs.version }} -f
       - name: Build AAR
         run: |
           make lib_install
