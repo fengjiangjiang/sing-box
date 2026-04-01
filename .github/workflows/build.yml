@@ -1,10 +1,10 @@
-name: Build Android AAR
+name: Build Android AAR from tag
 
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version name"
+        description: "version name"
         required: true
         type: string
 
@@ -12,9 +12,10 @@ jobs:
   build_aar:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: Checkout specified tag
         uses: actions/checkout@v5
         with:
+          ref: refs/tags/v${{ github.event.inputs.version }}
           fetch-depth: 0
           submodules: 'recursive'
       - name: Setup Go
@@ -28,9 +29,6 @@ jobs:
       - name: Setup OpenJDK
         run: |
           sudo apt update && sudo apt install -y openjdk-17-jdk-headless
-      - name: Set version tag
-        run: |
-          git tag v${{ github.event.inputs.version }} -f
       - name: Build AAR
         run: |
           make lib_install
@@ -42,5 +40,5 @@ jobs:
       - name: Upload AAR
         uses: actions/upload-artifact@v4
         with:
-          name: libbox-aar
+          name: libbox-aar-${{ github.event.inputs.version }}
           path: "*.aar"
