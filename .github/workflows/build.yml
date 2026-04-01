@@ -1,32 +1,44 @@
-- name: Build AAR
-  run: |
-    make lib_install
-    export PATH="$PATH:$(go env GOPATH)/bin"
-    export ANDROID_ABI="arm64-v8a armeabi-v7a"   # 按需修改
-    make lib_android
-  env:
-    JAVA_HOME: /usr/lib/jvm/java-17-openjdk-amd64
-    ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+name: Build Android AAR from tag
 
-- name: Strip and repack AAR
-  run: |
-    # 假设 AAR 输出在项目根目录
-    AAR_FILE=$(ls *.aar | head -n 1)
-    if [ -z "$AAR_FILE" ]; then
-      echo "No AAR found"
-      exit 1
-    fi
-    # 解压
-    mkdir aar_temp
-    unzip -q "$AAR_FILE" -d aar_temp
-    # Strip .so 文件
-    find aar_temp -name "*.so" -exec $ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip --strip-unneeded {} \;
-    # 可选：删除不需要的 ABI 目录（如果 ANDROID_ABI 未生效）
-    # cd aar_temp/jni && rm -rf x86 x86_64 && cd -
-    # 重新打包
-    cd aar_temp
-    zip -r -9 "../$AAR_FILE" .
-    cd ..
-    rm -rf aar_temp
-  env:
-    ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "version name"
+        required: true
+        type: string
+
+jobs:
+  build_aar:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout specified tag
+        uses: actions/checkout@v5
+        with:
+          ref: refs/tags/v${{ github.event.inputs.version }}
+          fetch-depth: 0
+          submodules: 'recursive'
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ~1.25.8
+      - name: Setup Android NDK
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r28
+      - name: Setup OpenJDK
+        run: |
+          sudo apt update && sudo apt install -y openjdk-17-jdk-headless
+      - name: Build AAR
+        run: |
+          make lib_install
+          export PATH="$PATH:$(go env GOPATH)/bin"
+          make lib_android
+        env:
+          JAVA_HOME: /usr/lib/jvm/java-17-openjdk-amd64
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+      - name: Upload AAR
+        uses: actions/upload-artifact@v4
+        with:
+          name: libbox-aar-${{ github.event.inputs.version }}
+          path: "*.aar"
